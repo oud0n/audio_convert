@@ -19,4 +19,5 @@ linux:
   target:
     - AppImage
     - deb
+  maintainer: oud0n <oud0n@example.com>
 publish: null
