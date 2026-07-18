@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   build-and-release:
-    runs-on: windows-latest
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
 
     steps:
       - name: Checkout repository
@@ -33,8 +37,12 @@ jobs:
       - name: Create GitHub Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: false
           files: |
             dist/Audio Converter Setup *.exe
             dist/Audio Converter Setup *.exe.blockmap
+            dist/Audio Converter-*.dmg
+            dist/Audio Converter-*.AppImage
+            dist/Audio Converter-*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

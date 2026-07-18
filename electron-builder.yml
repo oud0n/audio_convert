@@ -9,4 +9,14 @@ files:
     filter:
       - package.json
       - app/**/*
+mac:
+  target:
+    - dmg
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage
+    - deb
 publish: null
