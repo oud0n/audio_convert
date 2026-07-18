@@ -1,38 +1,49 @@
-<p align="center"><img src="https://i.imgur.com/a9QWW0v.png"></p>
+# Audio Converter
 
-## Usage
+Next.js と Electron (Nextron) で構築された、デスクトップ向けの高機能オーディオフォーマット変換アプリケーションです。
+直感的なマルチタブ（マルチジョブ）インターフェースにより、複数の変換タスクをタブで管理しながら一括で変換処理を行うことができます。
 
-### Create an App
+## 主な機能
 
+* **マルチタブ（マルチジョブ）管理**:
+  - タブごとに異なる変換パラメータ（フォーマット、出力先、命名ルール等）を設定・保存できます。
+  - アプリ終了時にタブの状態や変換設定が自動で `settings.json` に保存され、次回起動時に復元されます。
+* **多様なオーディオファイルデコード**:
+  - Web Audio API (AudioContext) による高速なブラウザデコードに対応。
+  - ブラウザでデコードできない一部の形式（ALAC/M4Aなど）については、メインプロセス側の Node.js 音声デコーダーによる安全なフォールバック処理を自動で起動します。
+* **メタデータ（ID3タグなど）の読み込み・編集**:
+  - 変換前に、タイトル、アーティスト、アルバム、アルバムアーティスト、ディスク番号、トラック番号、リリース年、ジャンル、コメントなどのタグ情報を一覧で表示・直接編集できます。
+  - トラック番号やディスク番号が未定義の場合、自動的にデフォルト値（`1` 等）を設定してリネームを安定させます。
+* **タグ情報に基づく自動ファイルリネーム**:
+  - `{artist} - {title}`、`{album} - {track} - {title}` などのカスタムパターンを使用し、タグ情報から出力ファイル名を自動生成できます。
+* **高度な処理オプション**:
+  - 変換完了後、元のソースファイルを安全にゴミ箱へ移動するオプション（Electronの安全なAPIを使用）。
+  - 音声データの音量ノーマライズ（正規化）、無音区間の自動トリミング機能。
+  - スレッドプールサイズやサンプリングレート、ビット深度、チャンネル数、ビットレートの微調整。
+* **多言語対応 (Localization)**:
+  - 上部メニューから日本語と英語の表示言語をワンクリックで切り替えることができます。
+
+## 開発とビルド
+
+### 依存関係のインストール
+```bash
+npm install
 ```
-# with npx
-$ npx create-nextron-app my-app --example with-tailwindcss
 
-# with yarn
-$ yarn create nextron-app my-app --example with-tailwindcss
-
-# with pnpm
-$ pnpm dlx create-nextron-app my-app --example with-tailwindcss
+### 開発モードでの起動
+```bash
+npm run dev
 ```
 
-### Install Dependencies
-
+### プロダクションビルド（パッケージング）
+```bash
+npm run build
 ```
-$ cd my-app
+※ ビルド実行時に自動的に Next.js の古い型定義キャッシュ（`renderer/.next`）がクリーンアップされ、エラーなく `dist/Audio Converter Setup 1.0.0.exe` が生成されます。
 
-# using yarn or npm
-$ yarn (or `npm install`)
+## 課題点・既知の制限事項
 
-# using pnpm
-$ pnpm install --shamefully-hoist
-```
-
-### Use it
-
-```
-# development mode
-$ yarn dev (or `npm run dev` or `pnpm run dev`)
-
-# production build
-$ yarn build (or `npm run build` or `pnpm run build`)
-```
+* **検証済みの出力フォーマット**:
+  - 本アプリの変換機能は、現在のところ**出力フォーマットとして `FLAC` および `WAV` のみで動作検証**を行っています。その他の形式への変換については、正常にエンコードされない、または一部のメタデータが引き継がれない可能性があります。
+* **アートワーク（アルバムアート）の欠落**:
+  - 音声ファイルの変換（デコード・再エンコード）処理を行う際、基本的なテキストタグ情報（タイトル、アーティスト等）は保持されますが、**埋め込まれているアルバムアート（画像データ）は変換後のファイルから欠落します**。あらかじめご了承ください。

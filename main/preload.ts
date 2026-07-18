@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron'
+import { contextBridge, ipcRenderer, IpcRendererEvent, webUtils } from 'electron'
 
 const handler = {
   send<T>(channel: string, value?: T) {
@@ -13,6 +13,12 @@ const handler = {
       ipcRenderer.removeListener(channel, subscription)
     }
   },
+  invoke<T>(channel: string, ...args: any[]): Promise<T> {
+    return ipcRenderer.invoke(channel, ...args)
+  },
+  getPathForFile(file: File): string {
+    return webUtils.getPathForFile(file)
+  }
 }
 
 contextBridge.exposeInMainWorld('ipc', handler)

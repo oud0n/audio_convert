@@ -1,12 +1,12 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
-import { AudioFile, ConverterSettings, MetadataTags } from '../types';
-import { bufferToWav, analyzeAudioBuffer, createMockAudioBuffer } from '../utils/audioEncoder';
+import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry } from '../types';
+import { bufferToWav, analyzeAudioBuffer } from '../utils/audioEncoder';
 
 interface AudioConverterContextType {
   files: AudioFile[];
-  setFiles: React.Dispatch<React.SetStateAction<AudioFile[]>>;
+  setFiles: (update: AudioFile[] | ((prev: AudioFile[]) => AudioFile[])) => void;
   settings: ConverterSettings;
-  setSettings: React.Dispatch<React.SetStateAction<ConverterSettings>>;
+  setSettings: (update: ConverterSettings | ((prev: ConverterSettings) => ConverterSettings)) => void;
   selectedFileId: string | null;
   setSelectedFileId: (id: string | null) => void;
   isConverting: boolean;
@@ -14,46 +14,292 @@ interface AudioConverterContextType {
   setToast: React.Dispatch<React.SetStateAction<{ type: 'success' | 'info' | 'error'; message: string } | null>>;
   showToast: (type: 'success' | 'info' | 'error', message: string) => void;
   handleAddFiles: (fileList: FileList | File[]) => void;
-  handleLoadDemoLoops: () => void;
   handleStartConversion: () => void;
   handleCancelConversion: () => void;
   handleUpdateTags: (id: string, newTags: Partial<MetadataTags>) => void;
+
+  // Tab-related Extensions
+  tabs: JobTab[];
+  setTabs: React.Dispatch<React.SetStateAction<JobTab[]>>;
+  activeTabId: string;
+  setActiveTabId: (id: string) => void;
+  handleAddTab: (name?: string) => void;
+  handleRemoveTab: (id: string) => void;
+  handleRenameTab: (id: string, name: string) => void;
+  logs: LogEntry[];
+  addLog: (message: string, type?: 'info' | 'success' | 'error') => void;
+  clearLogs: () => void;
+  skippedFiles: Array<{ name: string; reason: string }> | null;
+  setSkippedFiles: React.Dispatch<React.SetStateAction<Array<{ name: string; reason: string }> | null>>;
+  lang: 'ja' | 'en';
+  setLang: (lang: 'ja' | 'en') => void;
 }
 
 const AudioConverterContext = createContext<AudioConverterContextType | undefined>(undefined);
 
+const defaultSettings: ConverterSettings = {
+  outputFormat: 'WAV',
+  bitrate: '320',
+  sampleRate: 44100,
+  bitDepth: '16',
+  channels: 2,
+  normalize: true,
+  normalizationTargetDb: -1.0,
+  autoNotification: true,
+  notificationSound: 'chime',
+  volumeBoostDb: 0,
+  trimSilence: false,
+  trimSilenceThresholdDb: -50,
+  threadPoolSize: 4,
+  ffmpegHighSpeed: true,
+  autoRemoveCompleted: false,
+  electronDesktopMode: true,
+  deleteOriginalAfterConvert: false,
+  saveInSourceFolder: true,
+  renameByTags: true,
+  renamePattern: '{artist} - {title}',
+  localSavePath: '~/Music/Audio-Convert-Outputs',
+};
+
 export const AudioConverterProvider = ({ children }: { children: React.ReactNode }) => {
-  const [files, setFiles] = useState<AudioFile[]>([]);
-  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+  const [tabs, setTabs] = useState<JobTab[]>([]);
+  const [activeTabId, _setActiveTabId] = useState<string>('');
+
+  const saveSettingsToDisk = (currentTabs: JobTab[], activeId: string) => {
+    if (typeof window === 'undefined' || !window.ipc) return;
+    const tabsToSave = currentTabs.map(t => ({
+      id: t.id,
+      name: t.name,
+      settings: t.settings,
+    }));
+    window.ipc.invoke('save-settings-file', {
+      tabs: tabsToSave,
+      activeTabId: activeId,
+    }).catch((e) => {
+      console.warn('Failed to save settings to disk:', e);
+    });
+  };
+
+  const setActiveTabId = (id: string) => {
+    _setActiveTabId(id);
+    if (id && tabs.length > 0) {
+      saveSettingsToDisk(tabs, id);
+    }
+  };
+
   const [isConverting, setIsConverting] = useState(false);
   const [toast, setToast] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(null);
+  const [skippedFiles, setSkippedFiles] = useState<Array<{ name: string; reason: string }> | null>(null);
+  const [lang, setLang] = useState<'ja' | 'en'>('ja');
 
   const conversionQueueRef = useRef<string[]>([]);
   const activeConversionIdRef = useRef<string | null>(null);
+  const activeConversionTabIdRef = useRef<string | null>(null);
+  const defaultSavePathRef = useRef<string>('~/Music/Audio-Convert-Outputs');
 
-  // Global Settings State
-  const [settings, setSettings] = useState<ConverterSettings>({
-    outputFormat: 'WAV',
-    bitrate: '320',
-    sampleRate: 44100,
-    bitDepth: '16',
-    channels: 2,
-    normalize: true,
-    normalizationTargetDb: -1.0,
-    autoNotification: true,
-    notificationSound: 'chime',
-    volumeBoostDb: 0,
-    trimSilence: false,
-    trimSilenceThresholdDb: -50,
-    threadPoolSize: 4,
-    ffmpegHighSpeed: true,
-    autoRemoveCompleted: false,
-    electronDesktopMode: true,
-    deleteOriginalAfterConvert: false,
-    renameByTags: true,
-    renamePattern: '{artist} - {title}',
-    localSavePath: '~/Music/X-Conv-Outputs',
-  });
+  // Initialize tabs by loading settings.json or falling back to default tab1 (FLAC)
+  useEffect(() => {
+    const initTabs = async () => {
+      let defaultPath = '~/Music/Audio-Convert-Outputs';
+      if (typeof window !== 'undefined' && window.ipc) {
+        try {
+          const resolvedPath = await window.ipc.invoke<string>('get-default-save-path');
+          if (resolvedPath) {
+            defaultPath = resolvedPath;
+            defaultSavePathRef.current = resolvedPath;
+          }
+        } catch (e) {
+          console.warn('Failed to get default save path:', e);
+        }
+      }
+
+      let loadedConfig: any = null;
+      if (typeof window !== 'undefined' && window.ipc) {
+        try {
+          loadedConfig = await window.ipc.invoke('load-settings-file');
+        } catch (e) {
+          console.warn('Failed to load settings file:', e);
+        }
+      }
+
+      if (loadedConfig && Array.isArray(loadedConfig.tabs) && loadedConfig.tabs.length > 0) {
+        const initialTabs: JobTab[] = loadedConfig.tabs.map((t: any) => ({
+          id: t.id || `tab_${Math.random().toString(36).substring(2, 7)}`,
+          name: t.name || 'tab1',
+          files: [],
+          settings: {
+            ...defaultSettings,
+            localSavePath: defaultPath,
+            ...t.settings,
+          },
+          logs: [
+            {
+              id: 'log_init_' + Math.random().toString(36).substring(2, 7),
+              timestamp: new Date().toLocaleTimeString(),
+              message: `Loaded profile "${t.name}" from settings.json. Ready.`,
+              type: 'info',
+            }
+          ],
+          selectedFileId: null,
+        }));
+        setTabs(initialTabs);
+        const savedActiveId = loadedConfig.activeTabId;
+        if (savedActiveId && initialTabs.some(t => t.id === savedActiveId)) {
+          _setActiveTabId(savedActiveId);
+        } else {
+          _setActiveTabId(initialTabs[0].id);
+        }
+      } else {
+        // Default fallback: a single tab named tab1 (or タブ1) with FLAC output format
+        const defaultTabName = lang === 'ja' ? 'タブ1' : 'tab1';
+        const fallbackTabId = 'tab_default_' + Math.random().toString(36).substring(2, 7);
+        const fallbackTabs: JobTab[] = [
+          {
+            id: fallbackTabId,
+            name: defaultTabName,
+            files: [],
+            settings: {
+              ...defaultSettings,
+              localSavePath: defaultPath,
+              outputFormat: 'FLAC',
+            },
+            logs: [
+              {
+                id: 'log_init_' + Math.random().toString(36).substring(2, 7),
+                timestamp: new Date().toLocaleTimeString(),
+                message: `Initialized default profile "${defaultTabName}". Ready.`,
+                type: 'info',
+              }
+            ],
+            selectedFileId: null,
+          }
+        ];
+        setTabs(fallbackTabs);
+        _setActiveTabId(fallbackTabId);
+      }
+    };
+
+    initTabs();
+  }, []);
+
+  const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0] || null;
+
+  // Deriving current tab scope state
+  const files = activeTab ? activeTab.files : [];
+  const settings = activeTab ? activeTab.settings : defaultSettings;
+  const selectedFileId = activeTab ? activeTab.selectedFileId : null;
+  const logs = activeTab ? activeTab.logs : [];
+
+  // Helper to add logs to specific tab
+  const addLogToTab = (tabId: string, message: string, type: 'info' | 'success' | 'error' = 'info') => {
+    const timestamp = new Date().toLocaleTimeString();
+    const logId = 'log_' + Math.random().toString(36).substring(2, 9);
+    const entry: LogEntry = { id: logId, timestamp, message, type };
+    setTabs(prev => prev.map(t => t.id === tabId ? { ...t, logs: [...t.logs, entry] } : t));
+  };
+
+  const addLog = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
+    if (activeTabId) {
+      addLogToTab(activeTabId, message, type);
+    }
+  };
+
+  const clearLogs = () => {
+    if (activeTabId) {
+      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, logs: [] } : t));
+    }
+  };
+
+  // Proxied setters
+  const setFiles = (update: AudioFile[] | ((prev: AudioFile[]) => AudioFile[])) => {
+    setTabs(prev => prev.map(t => {
+      if (t.id === activeTabId) {
+        const nextFiles = typeof update === 'function' ? update(t.files) : update;
+        return { ...t, files: nextFiles };
+      }
+      return t;
+    }));
+  };
+
+  const setSettings = (update: ConverterSettings | ((prev: ConverterSettings) => ConverterSettings)) => {
+    setTabs(prev => {
+      const nextTabs = prev.map(t => {
+        if (t.id === activeTabId) {
+          const nextSettings = typeof update === 'function' ? update(t.settings) : update;
+          return { ...t, settings: nextSettings };
+        }
+        return t;
+      });
+      saveSettingsToDisk(nextTabs, activeTabId);
+      return nextTabs;
+    });
+  };
+
+  const setSelectedFileId = (id: string | null) => {
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, selectedFileId: id } : t));
+  };
+
+  // Tab operations
+  const handleAddTab = (name?: string) => {
+    const newTabId = 'tab_' + Math.random().toString(36).substring(2, 9);
+    const defaultTabName = lang === 'ja' ? `タブ ${tabs.length + 1}` : `Tab ${tabs.length + 1}`;
+    const newTabName = name || defaultTabName;
+    const newTab: JobTab = {
+      id: newTabId,
+      name: newTabName,
+      files: [],
+      settings: { 
+        ...defaultSettings,
+        localSavePath: defaultSavePathRef.current
+      },
+      logs: [
+        {
+          id: 'log_' + Math.random().toString(36).substring(2, 9),
+          timestamp: new Date().toLocaleTimeString(),
+          message: lang === 'ja' 
+            ? `ジョブタブ "${newTabName}" が作成されました。準備完了。` 
+            : `Job Tab "${newTabName}" created. Ready.`,
+          type: 'info',
+        }
+      ],
+      selectedFileId: null,
+    };
+    setTabs(prev => {
+      const nextTabs = [...prev, newTab];
+      saveSettingsToDisk(nextTabs, newTabId);
+      return nextTabs;
+    });
+    _setActiveTabId(newTabId);
+    showToast('success', lang === 'ja' ? `ジョブタブを作成しました: ${newTabName}` : `Created job tab: ${newTabName}`);
+  };
+
+  const handleRemoveTab = (id: string) => {
+    if (tabs.length <= 1) {
+      showToast('error', lang === 'ja' ? '最後のタブを閉じることはできません。' : 'Cannot close the last remaining tab.');
+      return;
+    }
+    const index = tabs.findIndex(t => t.id === id);
+    const updated = tabs.filter(t => t.id !== id);
+    setTabs(updated);
+    
+    let nextActiveId = activeTabId;
+    if (activeTabId === id) {
+      const nextActiveIndex = Math.max(0, index - 1);
+      nextActiveId = updated[nextActiveIndex].id;
+      _setActiveTabId(nextActiveId);
+    }
+    
+    saveSettingsToDisk(updated, nextActiveId);
+    showToast('info', lang === 'ja' ? 'タブを閉じました。' : 'Tab closed.');
+  };
+
+  const handleRenameTab = (id: string, name: string) => {
+    setTabs(prev => {
+      const nextTabs = prev.map(t => t.id === id ? { ...t, name } : t);
+      saveSettingsToDisk(nextTabs, activeTabId);
+      return nextTabs;
+    });
+  };
 
   const showToast = (type: 'success' | 'info' | 'error', message: string) => {
     setToast({ type, message });
@@ -78,8 +324,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       const now = ctx.currentTime;
       if (type === 'chime') {
         osc.type = 'sine';
-        osc.frequency.setValueAtTime(523.25, now); // C5
-        osc.frequency.exponentialRampToValueAtTime(783.99, now + 0.15); // G5
+        osc.frequency.setValueAtTime(523.25, now);
+        osc.frequency.exponentialRampToValueAtTime(783.99, now + 0.15);
         gainNode.gain.setValueAtTime(0.3, now);
         gainNode.gain.exponentialRampToValueAtTime(0.001, now + 1.2);
         osc.start(now);
@@ -113,248 +359,391 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         osc.stop(now + 0.45);
       }
     } catch (err) {
-      console.warn('Synthesizer blocked or unsupported in this view:', err);
+      console.warn('Synthesizer blocked or unsupported:', err);
     }
   };
 
-  // Request browser Notification Permission on load
-  useEffect(() => {
-    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-  }, []);
-
-  // Handles adding files (pick or drop)
-  const handleAddFiles = (fileList: FileList | File[]) => {
-    if (typeof window === 'undefined') return;
-    const arr = Array.from(fileList);
-    const newFiles: AudioFile[] = arr.map((f) => {
+  const processAndDecodeFile = (f: File, targetTabId: string): Promise<{ success: boolean; fileRecord?: AudioFile; error?: string }> => {
+    return new Promise((resolve) => {
       const id = Math.random().toString(36).substring(2, 11);
       const ext = f.name.substring(f.name.lastIndexOf('.') + 1).toLowerCase() || 'mp3';
-      
-      const fileRecord: AudioFile = {
-        id,
-        name: f.name,
-        size: f.size,
-        duration: 0, // calculated shortly
-        originalFormat: ext,
-        outputFormat: settings.outputFormat,
-        bitrate: settings.bitrate,
-        sampleRate: settings.sampleRate,
-        channels: settings.channels,
-        status: 'queued',
-        progress: 0,
-        normalizationApplied: false,
-        tags: {
-          title: f.name.substring(0, f.name.lastIndexOf('.')) || f.name,
-          artist: 'Unknown Artist',
-          album: 'Converted Album',
-          year: new Date().getFullYear().toString(),
-          genre: 'Acoustic / Vocal',
-          track: '01',
-          comment: 'Rendered via X-Conv Audio Suite',
-        },
-      };
 
-      // Asynchronously decode and scan peak metadata
+      addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 解析開始 (サイズ: ${f.size} bytes, 拡張子: ${ext})`, 'info');
+
       const reader = new FileReader();
       reader.onload = async (e) => {
-        if (!e.target?.result) return;
+        if (!e.target?.result) {
+          addLogToTab(targetTabId, `[DEBUG] "${f.name}" - エラー: FileReaderの読み込み結果が空です`, 'error');
+          resolve({ success: false, error: 'ファイルの読み込みに失敗しました。' });
+          return;
+        }
         try {
           const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
           if (!AudioCtx) {
-            throw new Error('Web Audio API not supported');
+            addLogToTab(targetTabId, `[DEBUG] "${f.name}" - エラー: Web Audio API (AudioContext) が未サポートです`, 'error');
+            resolve({ success: false, error: 'Web Audio APIがサポートされていません。' });
+            return;
           }
           const audioCtx = new AudioCtx();
-          setFiles(prev => prev.map(item => item.id === id ? { ...item, status: 'decoding' } : item));
+          
+          addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザネイティブ(AudioContext.decodeAudioData)デコード開始...`, 'info');
           
           audioCtx.decodeAudioData(
             e.target.result as ArrayBuffer,
             (buffer) => {
+              addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコードに成功しました。再生時間: ${buffer.duration.toFixed(2)}秒`, 'success');
+              
+              let filePath = (f as any).path;
+              if (!filePath && typeof window !== 'undefined' && window.ipc && window.ipc.getPathForFile) {
+                try {
+                  filePath = window.ipc.getPathForFile(f);
+                } catch (pathErr) {
+                  console.warn('Failed to extract file path via webUtils:', pathErr);
+                }
+              }
+
               const info = analyzeAudioBuffer(buffer);
-              setFiles((prev) =>
-                prev.map((item) =>
-                  item.id === id
-                    ? {
-                        ...item,
-                        duration: Math.round(buffer.duration * 10) / 10,
-                        originalAudioBuffer: buffer,
-                        peakDb: info.peakDb,
-                        rmsDb: info.rmsDb,
-                        status: 'queued',
-                      }
-                    : item
-                )
-              );
+              const fileRecord: AudioFile = {
+                id,
+                name: f.name,
+                path: filePath,
+                size: f.size,
+                duration: Math.round(buffer.duration * 10) / 10,
+                originalFormat: ext,
+                outputFormat: settings.outputFormat,
+                bitrate: settings.bitrate,
+                sampleRate: settings.sampleRate,
+                channels: settings.channels,
+                status: 'queued',
+                progress: 0,
+                normalizationApplied: false,
+                originalAudioBuffer: buffer,
+                peakDb: info.peakDb,
+                rmsDb: info.rmsDb,
+                tags: {
+                  title: f.name.substring(0, f.name.lastIndexOf('.')) || f.name,
+                  artist: 'Unknown Artist',
+                  album: 'Converted Album',
+                  albumArtist: 'Unknown Artist',
+                  disc: '1',
+                  year: new Date().getFullYear().toString(),
+                  genre: 'Acoustic / Vocal',
+                  track: '01',
+                  comment: 'Rendered via Audio Convert',
+                },
+              };
+              resolve({ success: true, fileRecord });
             },
             (err) => {
-              console.warn('Browser could not decode natively. Using fallback buffer generator:', err);
-              const mockBuffer = createMockAudioBuffer(3.5 + Math.random() * 8.5);
-              const info = analyzeAudioBuffer(mockBuffer);
-              setFiles((prev) =>
-                prev.map((item) =>
-                  item.id === id
-                    ? {
-                        ...item,
-                        duration: Math.round(mockBuffer.duration * 10) / 10,
-                        originalAudioBuffer: mockBuffer,
-                        peakDb: info.peakDb,
-                        rmsDb: info.rmsDb,
-                        status: 'queued',
+              addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコード失敗: ${err?.message || '不明なデコードエラー'}。フォールバック処理を起動します。`, 'error');
+              
+              // Fallback to Electron Node/FFmpeg decoding
+              let filePath = (f as any).path;
+              if (!filePath && typeof window !== 'undefined' && window.ipc && window.ipc.getPathForFile) {
+                try {
+                  filePath = window.ipc.getPathForFile(f);
+                } catch (pathErr) {
+                  console.warn('Failed to extract file path via webUtils:', pathErr);
+                }
+              }
+              const hasIpc = !!(typeof window !== 'undefined' && window.ipc);
+              
+              addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 診断情報: file.path = "${filePath || 'undefined'}", window.ipc利用可能性 = ${hasIpc}`, 'info');
+
+              if (filePath && hasIpc) {
+                addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPC「decode-audio-to-wav」を呼び出し中 (Path: "${filePath}")...`, 'info');
+                
+                window.ipc.invoke<Uint8Array>('decode-audio-to-wav', filePath)
+                  .then(async (wavBuffer) => {
+                    addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPCデコード成功。WAVバイナリサイズ: ${wavBuffer.byteLength} bytes`, 'success');
+                    try {
+                      // Extract underlying ArrayBuffer safely
+                      const arrayBuffer = wavBuffer.buffer.slice(
+                        wavBuffer.byteOffset, 
+                        wavBuffer.byteOffset + wavBuffer.byteLength
+                      ) as ArrayBuffer;
+                      
+                      // Read metadata tags using music-metadata in main process
+                      let metadataTags = {
+                        title: f.name.substring(0, f.name.lastIndexOf('.')) || f.name,
+                        artist: 'Unknown Artist',
+                        album: 'Converted Album',
+                        albumArtist: 'Unknown Artist',
+                        disc: '1',
+                        year: new Date().getFullYear().toString(),
+                        genre: 'Acoustic / Vocal',
+                        track: '01',
+                        comment: 'Rendered via Audio Convert',
+                      };
+
+                      try {
+                        addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPC「read-audio-metadata」を呼び出し中...`, 'info');
+                        const metaResult = await window.ipc.invoke('read-audio-metadata', filePath);
+                        if (metaResult && metaResult.success) {
+                          addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ解析成功: タイトル="${metaResult.tags.title}", アーティスト="${metaResult.tags.artist}"`, 'success');
+                          metadataTags = {
+                            title: metaResult.tags.title || metadataTags.title,
+                            artist: metaResult.tags.artist || metadataTags.artist,
+                            album: metaResult.tags.album || metadataTags.album,
+                            albumArtist: metaResult.tags.albumArtist || metadataTags.albumArtist,
+                            disc: metaResult.tags.disc || metadataTags.disc,
+                            year: metaResult.tags.year || metadataTags.year,
+                            genre: metaResult.tags.genre || metadataTags.genre,
+                            track: metaResult.tags.track || metadataTags.track,
+                            comment: 'Decoded via FFmpeg',
+                          };
+                        } else {
+                          addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ解析失敗 (メインプロセス側): ${metaResult?.error || '不明'}`, 'error');
+                        }
+                      } catch (metaErr: any) {
+                        addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ通信例外: ${metaErr?.message || metaErr}`, 'error');
+                        console.warn('Failed to read metadata tags:', metaErr);
                       }
-                    : item
-                )
-              );
+
+                      // Decode the WAV buffer in renderer browser context
+                      addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 展開したWAVバッファの最終デコード開始...`, 'info');
+                      audioCtx.decodeAudioData(
+                        arrayBuffer,
+                        (decodedWavBuffer) => {
+                          addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 全デコードが正常完了しました!`, 'success');
+                          const info = analyzeAudioBuffer(decodedWavBuffer);
+                          const fileRecord: AudioFile = {
+                            id,
+                            name: f.name,
+                            path: filePath,
+                            size: f.size,
+                            duration: Math.round(decodedWavBuffer.duration * 10) / 10,
+                            originalFormat: ext,
+                            outputFormat: settings.outputFormat,
+                            bitrate: settings.bitrate,
+                            sampleRate: settings.sampleRate,
+                            channels: settings.channels,
+                            status: 'queued',
+                            progress: 0,
+                            normalizationApplied: false,
+                            originalAudioBuffer: decodedWavBuffer,
+                            peakDb: info.peakDb,
+                            rmsDb: info.rmsDb,
+                            tags: metadataTags,
+                          };
+                          resolve({ success: true, fileRecord });
+                        },
+                        (wavDecodeErr) => {
+                          addLogToTab(targetTabId, `[DEBUG] "${f.name}" - エラー: WAVデコードデータのWeb Audio読み込みに失敗しました。`, 'error');
+                          resolve({ success: false, error: 'FFmpegでデコードされたWAVデータの読み込みに失敗しました。' });
+                        }
+                      );
+                    } catch (decodeErr: any) {
+                      addLogToTab(targetTabId, `[DEBUG] "${f.name}" - デコード例外: ${decodeErr?.message || decodeErr}`, 'error');
+                      resolve({ success: false, error: decodeErr?.message || 'デコード処理中にエラーが発生しました。' });
+                    }
+                  })
+                  .catch((ipcErr) => {
+                    addLogToTab(targetTabId, `[DEBUG] "${f.name}" - エラー: IPC通信「decode-audio-to-wav」失敗 - ${ipcErr.message || ipcErr}`, 'error');
+                    if (window.ipc) {
+                      window.ipc.send('log-debug', `FFmpeg IPC decode failed for: ${f.name}. Error: ${ipcErr.message || ipcErr}`);
+                    }
+                    resolve({ success: false, error: `FFmpegデコード失敗: ${ipcErr.message || ipcErr}` });
+                  });
+              } else {
+                addLogToTab(targetTabId, `[DEBUG] "${f.name}" - エラー: フォールバック不能。ファイルパスまたはIPC接続が不足しています (filePath: ${filePath ? 'あり' : 'なし'}, hasIpc: ${hasIpc})`, 'error');
+                if (window.ipc) {
+                  window.ipc.send('log-debug', `Cannot fallback for: ${f.name}. filePath: ${filePath}, hasIpc: ${hasIpc}`);
+                }
+                const reason = err?.message || 'デコードエラー: 未対応のコーデックか、破損したファイルです。';
+                resolve({ success: false, error: reason });
+              }
             }
           );
-        } catch (err) {
-          console.error('Error initiating context:', err);
+        } catch (err: any) {
+          addLogToTab(targetTabId, `[DEBUG] "${f.name}" - デコーダ初期化エラー: ${err?.message || err}`, 'error');
+          resolve({ success: false, error: err?.message || 'オーディオデコーダの初期化に失敗しました。' });
         }
       };
-      reader.readAsArrayBuffer(f);
-
-      return fileRecord;
-    });
-
-    setFiles((prev) => [...prev, ...newFiles]);
-    showToast('info', `Added ${newFiles.length} file(s) to the queue.`);
-  };
-
-  const handleLoadDemoLoops = () => {
-    if (typeof window === 'undefined') return;
-    const demos = [
-      { name: 'Drum_Loop_120bpm.wav', duration: 4.0, format: 'wav', artist: 'Beatsmith' },
-      { name: 'Ethereal_Ambient_Pad.mp3', duration: 8.0, format: 'mp3', artist: 'Solar Drift' },
-      { name: 'Bassline_Arp_90s.ogg', duration: 6.0, format: 'ogg', artist: 'Retro Synths' },
-    ];
-
-    const loadedDemos: AudioFile[] = demos.map((d) => {
-      const id = Math.random().toString(36).substring(2, 11);
-      const buffer = createMockAudioBuffer(d.duration);
-      const info = analyzeAudioBuffer(buffer);
-
-      return {
-        id,
-        name: d.name,
-        size: Math.round(d.duration * 44100 * 4 + 44),
-        duration: d.duration,
-        originalFormat: d.format,
-        outputFormat: settings.outputFormat,
-        bitrate: settings.bitrate,
-        sampleRate: settings.sampleRate,
-        channels: settings.channels,
-        status: 'queued',
-        progress: 0,
-        originalAudioBuffer: buffer,
-        peakDb: info.peakDb,
-        rmsDb: info.rmsDb,
-        normalizationApplied: false,
-        tags: {
-          title: d.name.substring(0, d.name.lastIndexOf('.')),
-          artist: d.artist,
-          album: 'X-Conv Synthesized Studio',
-          year: '2026',
-          genre: 'Synthesized Demo',
-          track: '01',
-          comment: 'Perfect peak-normalized render',
-        },
+      reader.onerror = () => {
+        addLogToTab(targetTabId, `[DEBUG] "${f.name}" - FileReaderエラー発生`, 'error');
+        resolve({ success: false, error: 'ファイルの読込中にエラーが発生しました。' });
       };
+      reader.readAsArrayBuffer(f);
+    });
+  };
+
+  // Handles adding files
+  const handleAddFiles = async (fileList: FileList | File[]) => {
+    if (typeof window === 'undefined') return;
+    const targetTabId = activeTabId;
+    const tabName = tabs.find(t => t.id === targetTabId)?.name || 'current';
+    const arr = Array.from(fileList);
+
+    const analyzingMsg = lang === 'ja' ? `${arr.length}個のファイルを解析中...` : `Analyzing ${arr.length} files...`;
+    const startedMsg = lang === 'ja' ? `${arr.length}個のファイルの読み込みとデコードを開始しました。` : `Started reading and decoding ${arr.length} files.`;
+    showToast('info', analyzingMsg);
+    addLogToTab(targetTabId, startedMsg, 'info');
+
+    const results = await Promise.all(arr.map(f => processAndDecodeFile(f, targetTabId)));
+
+    const succeededFiles: AudioFile[] = [];
+    const skippedFiles: Array<{ name: string; reason: string }> = [];
+
+    results.forEach((res, i) => {
+      const originalFile = arr[i];
+      if (res.success && res.fileRecord) {
+        succeededFiles.push(res.fileRecord);
+      } else {
+        skippedFiles.push({
+          name: originalFile.name,
+          reason: res.error || (lang === 'ja' ? '不明なエラー' : 'Unknown Error')
+        });
+      }
     });
 
-    setFiles((prev) => [...prev, ...loadedDemos]);
-    showToast('success', 'Loaded 3 synthetic demonstration loops. Adjust settings and start converter!');
+    if (succeededFiles.length > 0) {
+      setTabs(prev => prev.map(t => t.id === targetTabId ? {
+        ...t,
+        files: [...t.files, ...succeededFiles]
+      } : t));
+      
+      const successLog = lang === 'ja' ? `${succeededFiles.length}個のファイルをインポートしました。` : `Imported ${succeededFiles.length} files.`;
+      const successToast = lang === 'ja' ? `${succeededFiles.length}個のファイルを "${tabName}" に追加しました。` : `Added ${succeededFiles.length} files to "${tabName}".`;
+      addLogToTab(targetTabId, successLog, 'success');
+      showToast('success', successToast);
+    }
+
+    if (skippedFiles.length > 0) {
+      skippedFiles.forEach(skipped => {
+        const skippedMsg = lang === 'ja' ? `スキップ: "${skipped.name}" - ${skipped.reason}` : `Skipped: "${skipped.name}" - ${skipped.reason}`;
+        addLogToTab(targetTabId, skippedMsg, 'error');
+      });
+      setSkippedFiles(skippedFiles);
+    }
   };
+
+
 
   const handleStartConversion = () => {
-    const queued = files.filter((f) => f.status === 'queued' || f.status === 'failed');
+    const targetTabId = activeTabId;
+    const currentTab = tabs.find(t => t.id === targetTabId);
+    if (!currentTab) return;
+
+    const queued = currentTab.files.filter((f) => f.status === 'queued' || f.status === 'failed');
     if (queued.length === 0) {
-      showToast('error', 'No queued files to convert.');
+      showToast('error', lang === 'ja' ? 'このタブには変換待ちのファイルがありません。' : 'No queued files to convert in this tab.');
       return;
     }
 
     setIsConverting(true);
+    activeConversionTabIdRef.current = targetTabId;
     conversionQueueRef.current = queued.map((f) => f.id);
+    
+    addLogToTab(targetTabId, lang === 'ja' ? `${queued.length}個のファイルのバッチ処理を開始します...` : `Starting batch pipeline for ${queued.length} items...`, 'info');
     processNextInQueue();
   };
 
   const processNextInQueue = () => {
+    const targetTabId = activeConversionTabIdRef.current;
+    if (!targetTabId) {
+      setIsConverting(false);
+      return;
+    }
+
     if (conversionQueueRef.current.length === 0) {
       setIsConverting(false);
       activeConversionIdRef.current = null;
+      activeConversionTabIdRef.current = null;
       
-      showToast('success', 'Batch conversion pipeline completed successfully!');
+      addLogToTab(targetTabId, lang === 'ja' ? 'バッチ変換処理が正常に完了しました。' : 'Batch conversion pipeline completed successfully.', 'success');
+      showToast('success', lang === 'ja' ? 'バッチ変換処理が完了しました！' : 'Batch conversion pipeline completed!');
       
-      if (settings.autoNotification) {
-        playNotificationSound(settings.notificationSound);
+      const tabSettings = tabs.find(t => t.id === targetTabId)?.settings || defaultSettings;
+      if (tabSettings.autoNotification) {
+        playNotificationSound(tabSettings.notificationSound);
       }
 
       if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-        new Notification('X-Conv Batch Suite', {
-          body: 'All files converted and peak-normalized successfully!',
+        new Notification('Audio Convert', {
+          body: lang === 'ja' ? 'すべてのファイルの変換と正規化が完了しました。' : 'All files converted and peak-normalized successfully!',
         });
       }
 
-      if (settings.autoRemoveCompleted) {
-        setFiles((prev) => prev.filter((f) => f.status !== 'completed'));
+      if (tabSettings.autoRemoveCompleted) {
+        setTabs(prev => prev.map(t => t.id === targetTabId ? {
+          ...t,
+          files: t.files.filter((f) => f.status !== 'completed')
+        } : t));
       }
       return;
     }
 
     const currentId = conversionQueueRef.current.shift()!;
     activeConversionIdRef.current = currentId;
-    
-    runConversionWorkflow(currentId);
+    runConversionWorkflow(targetTabId, currentId);
   };
 
-  const runConversionWorkflow = async (id: string) => {
-    const fileRecord = files.find((f) => f.id === id);
-    if (!fileRecord || !fileRecord.originalAudioBuffer) {
-      updateFileStatus(id, 'failed', 0, 'Audio source missing or unreadable');
+  const runConversionWorkflow = async (tabId: string, id: string) => {
+    const tab = tabs.find(t => t.id === tabId);
+    const fileRecord = tab?.files.find((f) => f.id === id);
+    
+    if (!tab || !fileRecord || !fileRecord.originalAudioBuffer) {
+      updateFileStatus(tabId, id, 'failed', 0, 'Audio source missing or unreadable');
       processNextInQueue();
       return;
     }
 
+    const tabSettings = tab.settings;
+
     try {
-      // 1. Scanning Peak & Normalizing
-      updateFileStatus(id, 'normalizing', 15);
+      addLogToTab(tabId, `[${fileRecord.name}] Step 1: Normalizing amplitude...`, 'info');
+      updateFileStatus(tabId, id, 'normalizing', 15);
       await delay(600);
 
       const buffer = fileRecord.originalAudioBuffer;
       const originalPeaks = analyzeAudioBuffer(buffer);
-      const targetDb = settings.normalizationTargetDb;
+      const targetDb = tabSettings.normalizationTargetDb;
 
       let gainMult = 1.0;
-      if (settings.normalize && originalPeaks.peakDb > -120) {
+      if (tabSettings.normalize && originalPeaks.peakDb > -120) {
         const peakAmp = Math.pow(10, originalPeaks.peakDb / 20);
         const targetAmp = Math.pow(10, targetDb / 20);
         gainMult = targetAmp / peakAmp;
       }
 
-      // 2. Encoding / Resampling to WAV
-      updateFileStatus(id, 'converting', 40);
+      addLogToTab(tabId, `[${fileRecord.name}] Step 2: Transcoding buffer to WAV (resampling: ${tabSettings.sampleRate}Hz, bit depth: ${tabSettings.bitDepth}-bit)...`, 'info');
+      updateFileStatus(tabId, id, 'converting', 40);
       await delay(400);
 
       const outputSettings = {
-        ...settings,
+        ...tabSettings,
         outputFormat: fileRecord.outputFormat as any,
       };
 
       const outBuffer = bufferToWav(buffer, outputSettings, (progress) => {
         const overallProg = Math.round(40 + (progress / 100) * 55);
-        updateFileStatus(id, 'converting', overallProg);
+        updateFileStatus(tabId, id, 'converting', overallProg);
       });
 
-      // 3. Create blob and download URL
       const wavBlob = new Blob([outBuffer], { type: 'audio/wav' });
       const convertedUrl = typeof window !== 'undefined' ? URL.createObjectURL(wavBlob) : null;
 
       let finalExportName = fileRecord.name;
-      if (settings.renameByTags && fileRecord.tags) {
-        let pattern = settings.renamePattern;
+      if (tabSettings.renameByTags && fileRecord.tags) {
+        let pattern = tabSettings.renamePattern;
         pattern = pattern.replace('{artist}', fileRecord.tags.artist || 'Unknown Artist');
         pattern = pattern.replace('{title}', fileRecord.tags.title || 'Untitled');
         pattern = pattern.replace('{album}', fileRecord.tags.album || 'Unknown Album');
-        pattern = pattern.replace('{track}', fileRecord.tags.track || '01');
+        pattern = pattern.replace('{albumArtist}', fileRecord.tags.albumArtist || 'Unknown Artist');
+        
+        // Handle disc number (default to "1" if not found)
+        const rawDisc = fileRecord.tags.disc ? fileRecord.tags.disc.toString().trim() : '1';
+        const discInt = parseInt(rawDisc);
+        const discStr = isNaN(discInt) ? '1' : discInt.toString();
+        pattern = pattern.replace('{disc}', discStr);
+        
+        // Handle track number (default to "01" if not found, padded to 2 digits)
+        const rawTrack = fileRecord.tags.track ? fileRecord.tags.track.toString().trim() : '01';
+        const trackInt = parseInt(rawTrack);
+        const trackStr = isNaN(trackInt) ? '01' : trackInt.toString().padStart(2, '0');
+        pattern = pattern.replace('{track}', trackStr);
+        
         pattern = pattern.replace('{year}', fileRecord.tags.year || '2026');
         pattern = pattern.replace('{genre}', fileRecord.tags.genre || 'Electronic');
         finalExportName = `${pattern}.${fileRecord.outputFormat.toLowerCase()}`;
@@ -364,74 +753,125 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         finalExportName = `${baseName}.${fileRecord.outputFormat.toLowerCase()}`;
       }
 
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.id === id
-            ? {
-                ...f,
-                name: finalExportName,
-                status: 'completed',
-                progress: 100,
-                convertedAudioUrl: convertedUrl,
-                convertedBlob: wavBlob,
-                normalizationApplied: settings.normalize,
-                gainMultiplier: gainMult,
-                originalDeleted: settings.deleteOriginalAfterConvert,
-              }
-            : f
-        )
-      );
+      // 1. Save to local disk via IPC
+      if (typeof window !== 'undefined' && window.ipc) {
+        addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ファイルをディスクに書き込み中...` : `[${fileRecord.name}] Writing file to disk...`, 'info');
+        const saveResult = await window.ipc.invoke<{ success: boolean; path?: string; error?: string }>('save-converted-file', {
+          fileBuffer: outBuffer,
+          savePath: tabSettings.localSavePath,
+          saveInSourceFolder: tabSettings.saveInSourceFolder,
+          inputFilePath: fileRecord.path,
+          fileName: finalExportName,
+          outputFormat: fileRecord.outputFormat,
+          bitrate: tabSettings.bitrate,
+          tags: fileRecord.tags,
+        });
 
-      if (settings.deleteOriginalAfterConvert) {
-        showToast('success', `Electron Shell: Original source "${fileRecord.name}" successfully purged from workspace.`);
+        if (saveResult && saveResult.success) {
+          addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ディスク保存完了: "${saveResult.path}"` : `[${fileRecord.name}] Saved successfully to: "${saveResult.path}"`, 'success');
+        } else {
+          throw new Error(saveResult?.error || 'Failed to save file');
+        }
       }
+
+      // 2. Trash original file if deleteOriginalAfterConvert is active
+      let originalDeleted = false;
+      if (tabSettings.deleteOriginalAfterConvert && fileRecord.path && typeof window !== 'undefined' && window.ipc) {
+        addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動中...` : `[${fileRecord.name}] Moving original file to trash...`, 'info');
+        const trashResult = await window.ipc.invoke<{ success: boolean; error?: string }>('trash-file', fileRecord.path);
+        if (trashResult && trashResult.success) {
+          addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動しました。` : `[${fileRecord.name}] Moved original file to trash.`, 'success');
+          originalDeleted = true;
+        } else {
+          addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルのゴミ箱への移動に失敗しました: ${trashResult.error}` : `[${fileRecord.name}] Failed to move original file to trash: ${trashResult.error}`, 'error');
+        }
+      }
+
+      setTabs(prev => prev.map(t => {
+        if (t.id === tabId) {
+          return {
+            ...t,
+            files: t.files.map(f => f.id === id ? {
+              ...f,
+              name: finalExportName,
+              status: 'completed',
+              progress: 100,
+              convertedAudioUrl: convertedUrl,
+              convertedBlob: wavBlob,
+              normalizationApplied: tabSettings.normalize,
+              gainMultiplier: gainMult,
+              originalDeleted: originalDeleted,
+            } : f)
+          };
+        }
+        return t;
+      }));
+
+      addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換に成功しました。` : `[${fileRecord.name}] Conversion finished successfully.`, 'success');
 
       await delay(300);
       processNextInQueue();
 
     } catch (err: any) {
-      console.error('Conversion crashed:', err);
-      updateFileStatus(id, 'failed', 0, err.message || 'Pipeline buffer overflow');
+      console.error(err);
+      addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換失敗: ${err.message}` : `[${fileRecord.name}] Conversion failed: ${err.message}`, 'error');
+      updateFileStatus(tabId, id, 'failed', 0, err.message || 'Pipeline buffer overflow');
       processNextInQueue();
     }
   };
 
   const updateFileStatus = (
+    tabId: string,
     id: string,
     status: AudioFile['status'],
     progress: number,
     error?: string
   ) => {
-    setFiles((prev) =>
-      prev.map((f) => (f.id === id ? { ...f, status, progress, error } : f))
-    );
+    setTabs(prev => prev.map(t => {
+      if (t.id === tabId) {
+        return {
+          ...t,
+          files: t.files.map(f => f.id === id ? { ...f, status, progress, error } : f)
+        };
+      }
+      return t;
+    }));
   };
 
   const handleCancelConversion = () => {
+    const targetTabId = activeConversionTabIdRef.current;
+    if (!targetTabId) return;
+
     conversionQueueRef.current = [];
     if (activeConversionIdRef.current) {
-      updateFileStatus(activeConversionIdRef.current, 'failed', 0, 'Conversion aborted by operator');
+      updateFileStatus(targetTabId, activeConversionIdRef.current, 'failed', 0, lang === 'ja' ? 'オペレーターによって処理が中断されました。' : 'Conversion aborted by operator');
+      addLogToTab(targetTabId, lang === 'ja' ? '処理が手動で中断されました。' : 'Pipeline aborted manually by operator.', 'error');
     }
     setIsConverting(false);
     activeConversionIdRef.current = null;
-    showToast('error', 'Batch pipeline canceled.');
+    activeConversionTabIdRef.current = null;
+    showToast('error', lang === 'ja' ? 'バッチ処理をキャンセルしました。' : 'Batch pipeline canceled.');
   };
 
   const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const handleUpdateTags = (id: string, newTags: Partial<MetadataTags>) => {
-    setFiles((prev) =>
-      prev.map((f) =>
-        f.id === id
-          ? {
-              ...f,
-              tags: { ...f.tags, ...newTags },
-              name: newTags.title ? `${newTags.title}.${f.originalFormat}` : f.name,
-            }
-          : f
-      )
-    );
-    showToast('success', 'Metadata tags written successfully to file header.');
+    const targetTabId = activeTabId;
+    setTabs(prev => prev.map(t => {
+      if (t.id === targetTabId) {
+        return {
+          ...t,
+          files: t.files.map(f => f.id === id ? {
+            ...f,
+            tags: { ...f.tags, ...newTags },
+            name: newTags.title ? `${newTags.title}.${f.originalFormat}` : f.name,
+          } : f)
+        };
+      }
+      return t;
+    }));
+    addLogToTab(targetTabId, lang === 'ja' ? `トラック ID: ${id} のメタデータタグを更新しました。` : `Updated metadata tags for track ID: ${id}`, 'info');
+    showToast('success', lang === 'ja' ? 'メタデータをファイルヘッダーに保存しました。' : 'Metadata tags written successfully to file header.');
   };
 
   return (
@@ -448,10 +888,25 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         setToast,
         showToast,
         handleAddFiles,
-        handleLoadDemoLoops,
         handleStartConversion,
         handleCancelConversion,
         handleUpdateTags,
+
+        // Tab-related Extensions
+        tabs,
+        setTabs,
+        activeTabId,
+        setActiveTabId,
+        handleAddTab,
+        handleRemoveTab,
+        handleRenameTab,
+        logs,
+        addLog,
+        clearLogs,
+        skippedFiles,
+        setSkippedFiles,
+        lang,
+        setLang,
       }}
     >
       {children}

@@ -7,6 +7,8 @@ export interface MetadataTags {
   title: string;
   artist: string;
   album: string;
+  albumArtist: string;
+  disc: string;
   year: string;
   genre: string;
   track: string;
@@ -16,6 +18,7 @@ export interface MetadataTags {
 export interface AudioFile {
   id: string;
   name: string;
+  path?: string; // absolute local path resolved via preload webUtils
   size: number;
   duration: number; // in seconds
   originalFormat: string;
@@ -57,6 +60,7 @@ export interface ConverterSettings {
   // New Local Desktop App & Electron Features
   electronDesktopMode: boolean; // Simulates/enables direct local OS access via Electron bridge
   deleteOriginalAfterConvert: boolean; // Deletes the original file from workspace once successfully converted
+  saveInSourceFolder: boolean; // Save output files inside source directory
   renameByTags: boolean; // Enable file renaming based on ID3 metadata tags
   renamePattern: string; // Rename pattern (e.g., "{track} - {artist} - {title}")
   localSavePath: string; // Target directory path on Desktop
@@ -67,4 +71,31 @@ export interface SettingsPreset {
   name: string;
   settings: ConverterSettings;
   isCustom: boolean;
+}
+
+export interface LogEntry {
+  id: string;
+  timestamp: string;
+  message: string;
+  type: 'info' | 'success' | 'error';
+}
+
+export interface JobTab {
+  id: string;
+  name: string;
+  files: AudioFile[];
+  settings: ConverterSettings;
+  logs: LogEntry[];
+  selectedFileId: string | null;
+}
+
+declare global {
+  interface Window {
+    ipc: {
+      send: <T>(channel: string, value?: T) => void;
+      on: <T>(channel: string, callback: (...args: T[]) => void) => () => void;
+      invoke: <T = any>(channel: string, ...args: any[]) => Promise<T>;
+      getPathForFile: (file: File) => string;
+    };
+  }
 }

@@ -1,21 +1,12 @@
 import React from 'react';
-import Sidebar from './Sidebar';
 import { useAudioConverter } from '../context/AudioConverterContext';
 import { CheckCircle2, AlertCircle, Info, X } from './Icons';
 
 export default function Layout({ children }: { children: React.ReactNode }) {
-  const { files, isConverting, toast, setToast } = useAudioConverter();
-  
-  const pendingCount = files.filter((f) => f.status === 'queued').length;
+  const { toast, setToast } = useAudioConverter();
   
   return (
     <div id="root-container" className="flex h-screen bg-zinc-950 font-sans text-zinc-100 select-none overflow-hidden antialiased">
-      {/* Shared Navigation Sidebar */}
-      <Sidebar
-        pendingCount={pendingCount}
-        convertingCount={isConverting ? 1 : 0}
-      />
-
       {/* Main Panel Viewport */}
       <main className="flex-1 flex flex-col justify-between overflow-hidden relative">
         {children}

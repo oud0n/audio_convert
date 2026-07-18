@@ -1,5 +1,5 @@
 appId: com.example.nextron
-productName: My Nextron App
+productName: Audio Converter
 copyright: Copyright © 2026 Yoshihide Shiono
 directories:
   output: dist
@@ -8,5 +8,5 @@ files:
   - from: .
     filter:
       - package.json
-      - app
+      - app/**/*
 publish: null

@@ -43,6 +43,7 @@ export default function SettingsPage() {
         autoRemoveCompleted: false,
         electronDesktopMode: true,
         deleteOriginalAfterConvert: false,
+        saveInSourceFolder: true,
         renameByTags: true,
         renamePattern: '{artist} - {title}',
         localSavePath: '~/Music/X-Conv-Outputs',
@@ -70,6 +71,7 @@ export default function SettingsPage() {
         autoRemoveCompleted: true,
         electronDesktopMode: true,
         deleteOriginalAfterConvert: true, // Delete voice memos after conversion
+        saveInSourceFolder: true,
         renameByTags: true,
         renamePattern: '{track} - {title}',
         localSavePath: '~/Podcasts/Audits',
@@ -97,6 +99,7 @@ export default function SettingsPage() {
         autoRemoveCompleted: false,
         electronDesktopMode: false,
         deleteOriginalAfterConvert: false,
+        saveInSourceFolder: false,
         renameByTags: false,
         renamePattern: '{artist} - {album} - {title}',
         localSavePath: '~/Archive/Lossless',
