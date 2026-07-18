@@ -12,3 +12,6 @@ next-env.d.ts
 *.old
 
 sample/
+
+output_test.*
+*.log
