@@ -7,10 +7,15 @@ export const translations = {
     addFiles: 'ファイル追加',
     addFolder: 'フォルダ追加',
     clearQueue: 'キュークリア',
+    resetQueueBtn: 'キュー状態をリセット',
+    resetQueueTooltip: '変換完了・失敗した全ファイルのステータスを待機中に戻します',
+    sameAsSource: 'ソース品質を無劣化で維持 (Same as Source)',
+    sameAsSourceHint: '元音源のサンプリングレート・ビット深度を維持し、音響スケーリング・正規化を自動バイパスします',
     
     // Bottom tabs
     tabSourceFile: 'ソースファイル',
     tabMetadata: 'メタデータ',
+    tabQuality: '品質検証',
     tabLog: 'ログ',
     
     // Columns
@@ -26,6 +31,7 @@ export const translations = {
     outputPath: '出力パス',
     moveSourceToBin: '完了後、ソースファイルをゴミ箱に移動',
     createSourceFolder: 'ソースフォルダ内にファイルを作成',
+    autoVerifyQuality: '変換後に自動でデータ欠損・品質検証を行う',
     fileNamePattern: 'ファイル名パターン:',
     action: '動作',
     outputSettings: '出力設定',
@@ -53,6 +59,16 @@ export const translations = {
     metaWriteBtn: 'メタタグ書き込み',
     metaWriteDesc: '保存ボタンを押すと変更がファイルバッファヘッダーに書き込まれます。',
     metaSelectTrackDesc: 'テーブルのオーディオトラックを選択すると、波形の確認とID3メタタグの編集ができます。',
+    
+    // Quality Audit Tab & Badges
+    qualityTitle: 'オーディオ品質＆データ欠損検証',
+    qualitySelectTrackDesc: 'ファイルを選択すると、変換前後のデータ欠損および音質劣化の検証レポートを確認できます。',
+    qualityBadgePerfect: '✨100%完全一致',
+    qualityBadgePassed: '🟢品質正常',
+    qualityBadgeWarning: '⚠️変化あり',
+    qualityBadgeDegraded: '🔴劣化検出',
+    reverifyBtn: '品質検証を再実行',
+    verifyingText: 'データ欠損・音質検証中...',
     
     // Log Tab
     showDebugLogs: 'デバッグメッセージを表示',
@@ -100,10 +116,15 @@ export const translations = {
     addFiles: 'Add Files',
     addFolder: 'Add Folder',
     clearQueue: 'Clear Queue',
+    resetQueueBtn: 'Reset Queue Status',
+    resetQueueTooltip: 'Reset completed/failed file statuses to queued for re-conversion',
+    sameAsSource: 'Same as Source (Lossless)',
+    sameAsSourceHint: 'Keep original sample rate & bit depth, automatically bypassing normalization and scaling',
     
     // Bottom tabs
     tabSourceFile: 'Source File',
     tabMetadata: 'Metadata',
+    tabQuality: 'Quality Audit',
     tabLog: 'Logs',
     
     // Columns
@@ -119,6 +140,7 @@ export const translations = {
     outputPath: 'Output Path',
     moveSourceToBin: 'Trash source files upon completion',
     createSourceFolder: 'Save in source folder',
+    autoVerifyQuality: 'Auto-verify quality & data integrity after conversion',
     fileNamePattern: 'Filename pattern:',
     action: 'Action',
     outputSettings: 'Output Settings',
@@ -146,6 +168,16 @@ export const translations = {
     metaWriteBtn: 'Save Tags',
     metaWriteDesc: 'Click save to apply changes to file buffer header.',
     metaSelectTrackDesc: 'Select a track to audit waveform and edit ID3 tags.',
+    
+    // Quality Audit Tab & Badges
+    qualityTitle: 'Audio Quality & Data Loss Verification',
+    qualitySelectTrackDesc: 'Select a file to inspect data loss and quality audit reports.',
+    qualityBadgePerfect: '✨100% Exact Match',
+    qualityBadgePassed: '🟢Passed',
+    qualityBadgeWarning: '⚠️Changed',
+    qualityBadgeDegraded: '🔴Degraded',
+    reverifyBtn: 'Re-run Verification',
+    verifyingText: 'Verifying quality & integrity...',
     
     // Log Tab
     showDebugLogs: 'Show debug messages',

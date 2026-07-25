@@ -17,6 +17,8 @@ interface AudioConverterContextType {
   handleStartConversion: () => void;
   handleCancelConversion: () => void;
   handleUpdateTags: (id: string, newTags: Partial<MetadataTags>) => void;
+  handleVerifyQuality: (id: string) => Promise<void>;
+  handleResetQueueStatus: () => void;
 
   // Tab-related Extensions
   tabs: JobTab[];
@@ -53,6 +55,8 @@ const defaultSettings: ConverterSettings = {
   threadPoolSize: 4,
   ffmpegHighSpeed: true,
   autoRemoveCompleted: false,
+  autoVerifyQuality: true,
+  sameAsSource: false,
   electronDesktopMode: true,
   deleteOriginalAfterConvert: false,
   saveInSourceFolder: true,
@@ -393,14 +397,19 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             (buffer) => {
               addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコードに成功しました。再生時間: ${buffer.duration.toFixed(2)}秒`, 'success');
               
-              let filePath = (f as any).path;
-              if (!filePath && typeof window !== 'undefined' && window.ipc && window.ipc.getPathForFile) {
-                try {
-                  filePath = window.ipc.getPathForFile(f);
-                } catch (pathErr) {
-                  console.warn('Failed to extract file path via webUtils:', pathErr);
+              const resolveFilePath = (fileObj: File): string => {
+                if (typeof window !== 'undefined' && window.ipc && window.ipc.getPathForFile) {
+                  try {
+                    const resolved = window.ipc.getPathForFile(fileObj);
+                    if (resolved) return resolved;
+                  } catch (pathErr) {
+                    console.warn('Failed to extract file path via webUtils:', pathErr);
+                  }
                 }
-              }
+                return (fileObj as any).path || '';
+              };
+
+              const filePath = resolveFilePath(f);
 
               const info = analyzeAudioBuffer(buffer);
               const fileRecord: AudioFile = {
@@ -437,18 +446,22 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             (err) => {
               addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコード失敗: ${err?.message || '不明なデコードエラー'}。フォールバック処理を起動します。`, 'error');
               
-              // Fallback to Electron Node/FFmpeg decoding
-              let filePath = (f as any).path;
-              if (!filePath && typeof window !== 'undefined' && window.ipc && window.ipc.getPathForFile) {
-                try {
-                  filePath = window.ipc.getPathForFile(f);
-                } catch (pathErr) {
-                  console.warn('Failed to extract file path via webUtils:', pathErr);
+              const resolveFilePath = (fileObj: File): string => {
+                if (typeof window !== 'undefined' && window.ipc && window.ipc.getPathForFile) {
+                  try {
+                    const resolved = window.ipc.getPathForFile(fileObj);
+                    if (resolved) return resolved;
+                  } catch (pathErr) {
+                    console.warn('Failed to extract file path via webUtils:', pathErr);
+                  }
                 }
-              }
+                return (fileObj as any).path || '';
+              };
+
+              const filePath = resolveFilePath(f);
               const hasIpc = !!(typeof window !== 'undefined' && window.ipc);
               
-              addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 診断情報: file.path = "${filePath || 'undefined'}", window.ipc利用可能性 = ${hasIpc}`, 'info');
+              addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 診断情報: resolved filePath = "${filePath || 'undefined'}", window.ipc利用可能性 = ${hasIpc}`, 'info');
 
               if (filePath && hasIpc) {
                 addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPC「decode-audio-to-wav」を呼び出し中 (Path: "${filePath}")...`, 'info');
@@ -774,7 +787,41 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         }
       }
 
-      // 2. Trash original file if deleteOriginalAfterConvert is active
+      // 2. Perform Quality Verification if enabled
+      let verificationResult: any = undefined;
+      let savedPath = '';
+      if (typeof window !== 'undefined' && window.ipc) {
+        let targetDir = tabSettings.localSavePath;
+        if (tabSettings.saveInSourceFolder && fileRecord.path) {
+          targetDir = fileRecord.path.substring(0, Math.max(fileRecord.path.lastIndexOf('/'), fileRecord.path.lastIndexOf('\\')));
+        }
+        savedPath = `${targetDir}/${finalExportName}`;
+
+        if (tabSettings.autoVerifyQuality && fileRecord.path) {
+          addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] データ欠損・品質劣化チェックを実行中...` : `[${fileRecord.name}] Verifying quality and data loss...`, 'info');
+          const isLosslessPair = ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.originalFormat.toUpperCase()) &&
+                                ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.outputFormat.toUpperCase());
+          try {
+            const vRes = await window.ipc.invoke<{ success: boolean; result?: any; error?: string }>('verify-audio-quality', {
+              originalPath: fileRecord.path,
+              convertedPath: savedPath,
+              isLosslessPair,
+            });
+
+            if (vRes && vRes.success && vRes.result) {
+              verificationResult = vRes.result;
+              const logMsg = lang === 'ja'
+                ? `[${fileRecord.name}] 品質検証完了: ${vRes.result.summaryMessage}`
+                : `[${fileRecord.name}] Quality audit completed: ${vRes.result.summaryMessage}`;
+              addLogToTab(tabId, logMsg, vRes.result.status === 'perfect' || vRes.result.status === 'passed' ? 'success' : 'error');
+            }
+          } catch (vErr: any) {
+            console.warn('Auto quality verification error:', vErr);
+          }
+        }
+      }
+
+      // 3. Trash original file if deleteOriginalAfterConvert is active
       let originalDeleted = false;
       if (tabSettings.deleteOriginalAfterConvert && fileRecord.path && typeof window !== 'undefined' && window.ipc) {
         addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動中...` : `[${fileRecord.name}] Moving original file to trash...`, 'info');
@@ -801,6 +848,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               normalizationApplied: tabSettings.normalize,
               gainMultiplier: gainMult,
               originalDeleted: originalDeleted,
+              verificationResult: verificationResult,
             } : f)
           };
         }
@@ -817,6 +865,63 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換失敗: ${err.message}` : `[${fileRecord.name}] Conversion failed: ${err.message}`, 'error');
       updateFileStatus(tabId, id, 'failed', 0, err.message || 'Pipeline buffer overflow');
       processNextInQueue();
+    }
+  };
+
+  const handleVerifyQuality = async (id: string) => {
+    const targetTabId = activeTabId;
+    const tab = tabs.find(t => t.id === targetTabId);
+    const file = tab?.files.find(f => f.id === id);
+    if (!tab || !file || !file.path || typeof window === 'undefined' || !window.ipc) {
+      showToast('error', lang === 'ja' ? 'ソースファイルのパスが存在しません。' : 'Source file path missing');
+      return;
+    }
+
+    setTabs(prev => prev.map(t => t.id === targetTabId ? {
+      ...t,
+      files: t.files.map(f => f.id === id ? { ...f, isVerifying: true } : f)
+    } : t));
+
+    let targetDir = tab.settings.localSavePath;
+    if (tab.settings.saveInSourceFolder && file.path) {
+      targetDir = file.path.substring(0, Math.max(file.path.lastIndexOf('/'), file.path.lastIndexOf('\\')));
+    }
+    const outputPath = `${targetDir}/${file.name}`;
+
+    addLogToTab(targetTabId, lang === 'ja' ? `[${file.name}] 再検証を実行中...` : `[${file.name}] Re-running quality verification...`, 'info');
+    const isLosslessPair = ['WAV', 'FLAC', 'ALAC'].includes(file.originalFormat.toUpperCase()) &&
+                          ['WAV', 'FLAC', 'ALAC'].includes(file.outputFormat.toUpperCase());
+
+    try {
+      const vRes = await window.ipc.invoke<{ success: boolean; result?: any; error?: string }>('verify-audio-quality', {
+        originalPath: file.path,
+        convertedPath: outputPath,
+        isLosslessPair,
+      });
+
+      if (vRes && vRes.success && vRes.result) {
+        addLogToTab(targetTabId, lang === 'ja' ? `[${file.name}] 品質検証完了: ${vRes.result.summaryMessage}` : `[${file.name}] Quality audit finished: ${vRes.result.summaryMessage}`, 'success');
+        setTabs(prev => prev.map(t => t.id === targetTabId ? {
+          ...t,
+          files: t.files.map(f => f.id === id ? {
+            ...f,
+            isVerifying: false,
+            verificationResult: vRes.result
+          } : f)
+        } : t));
+      } else {
+        showToast('error', vRes?.error || (lang === 'ja' ? '検証に失敗しました。' : 'Verification failed'));
+        setTabs(prev => prev.map(t => t.id === targetTabId ? {
+          ...t,
+          files: t.files.map(f => f.id === id ? { ...f, isVerifying: false } : f)
+        } : t));
+      }
+    } catch (e: any) {
+      showToast('error', e.message || 'Verification exception');
+      setTabs(prev => prev.map(t => t.id === targetTabId ? {
+        ...t,
+        files: t.files.map(f => f.id === id ? { ...f, isVerifying: false } : f)
+      } : t));
     }
   };
 
@@ -874,6 +979,29 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     showToast('success', lang === 'ja' ? 'メタデータをファイルヘッダーに保存しました。' : 'Metadata tags written successfully to file header.');
   };
 
+  const handleResetQueueStatus = () => {
+    const targetTabId = activeTabId;
+    setTabs(prev => prev.map(t => {
+      if (t.id === targetTabId) {
+        return {
+          ...t,
+          files: t.files.map(f => ({
+            ...f,
+            status: 'queued',
+            progress: 0,
+            error: undefined,
+            verificationResult: undefined,
+            convertedAudioUrl: null,
+            convertedBlob: null,
+          }))
+        };
+      }
+      return t;
+    }));
+    addLogToTab(targetTabId, lang === 'ja' ? '全トラックの変換ステータスを待機中 (queued) にリセットしました。' : 'Reset all track conversion statuses to queued.', 'info');
+    showToast('info', lang === 'ja' ? 'キューのステータスを待機中にリセットしました。' : 'Queue statuses reset to queued.');
+  };
+
   return (
     <AudioConverterContext.Provider
       value={{
@@ -891,6 +1019,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         handleStartConversion,
         handleCancelConversion,
         handleUpdateTags,
+        handleVerifyQuality,
+        handleResetQueueStatus,
 
         // Tab-related Extensions
         tabs,

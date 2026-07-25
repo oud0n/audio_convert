@@ -15,6 +15,22 @@ export interface MetadataTags {
   comment: string;
 }
 
+export interface QualityVerificationResult {
+  verifiedAt: string;
+  isLosslessPair: boolean;
+  exactMatch: boolean; // MD5 100% Bit-exact Match
+  originalMd5?: string;
+  convertedMd5?: string;
+  snrDb?: number; // Signal-to-Noise ratio in dB
+  maxDiffDb?: number; // Max peak difference in dB
+  correlationPercent: number; // Waveform similarity correlation (0 - 100%)
+  hasHighFreqCutoff: boolean; // High frequency cutoff detection (e.g. MP3 ~16kHz)
+  cutoffFreqHz?: number; // Estimated cutoff frequency
+  status: 'perfect' | 'passed' | 'warning' | 'degraded';
+  summaryMessage: string;
+  details: string[];
+}
+
 export interface AudioFile {
   id: string;
   name: string;
@@ -38,6 +54,8 @@ export interface AudioFile {
   normalizationApplied: boolean;
   gainMultiplier?: number;
   originalDeleted?: boolean;
+  verificationResult?: QualityVerificationResult;
+  isVerifying?: boolean;
 }
 
 export interface ConverterSettings {
@@ -56,6 +74,8 @@ export interface ConverterSettings {
   threadPoolSize: number; // 1 to 16
   ffmpegHighSpeed: boolean; // toggle visual mode
   autoRemoveCompleted: boolean;
+  autoVerifyQuality: boolean; // Enable automatic quality and data loss verification after conversion
+  sameAsSource: boolean; // Keep original audio quality (sample rate, bit depth, bypass normalize)
   
   // New Local Desktop App & Electron Features
   electronDesktopMode: boolean; // Simulates/enables direct local OS access via Electron bridge

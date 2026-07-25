@@ -42,6 +42,7 @@ jobs:
           files: |
             dist/Audio Converter Setup *.exe
             dist/Audio Converter Setup *.exe.blockmap
+            dist/Audio Converter-*.zip
             dist/Audio Converter-*.dmg
             dist/Audio Converter-*.AppImage
             dist/Audio Converter-*.deb

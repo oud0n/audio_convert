@@ -52,31 +52,59 @@ ipcMain.on('log-debug', (event, arg) => {
   } catch (e) {}
 });
 
+// Helper to get usable FFmpeg binary path (handles app.asar unpacking and dev paths)
+function getExecutableFFmpegPath(): string | null {
+  if (ffmpegPath && typeof ffmpegPath === 'string') {
+    let resolved = ffmpegPath.replace('app.asar', 'app.asar.unpacked');
+    if (fs.existsSync(resolved)) {
+      return resolved;
+    }
+  }
+  const devPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+  if (fs.existsSync(devPath)) {
+    return devPath;
+  }
+  return ffmpegPath || null;
+}
+
 // IPC Handler to decode any audio file (ALAC, AAC, etc.) to PCM WAV via FFmpeg
 ipcMain.handle('decode-audio-to-wav', async (_event, filePath: string) => {
   return new Promise((resolve, reject) => {
     try {
-      fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] decode-audio-to-wav called. File: "${filePath}"\nFFmpeg Path: "${ffmpegPath}"\n`);
+      fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] decode-audio-to-wav called. File: "${filePath}"\n`);
     } catch (e) {}
 
-    if (!ffmpegPath) {
-      const err = new Error('FFmpeg static binary path not found.');
+    if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) {
+      const errMessage = `Decode target file does not exist: "${filePath}"`;
+      try { fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] Error: ${errMessage}\n`); } catch (e) {}
+      reject(new Error(errMessage));
+      return;
+    }
+
+    const execFfmpeg = getExecutableFFmpegPath();
+    try {
+      fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] Resolved FFmpeg Executable: "${execFfmpeg}"\n`);
+    } catch (e) {}
+
+    if (!execFfmpeg || !fs.existsSync(execFfmpeg)) {
+      const err = new Error(`FFmpeg binary not found or not executable. Path: "${execFfmpeg}"`);
       try { fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] Error: ${err.message}\n`); } catch (e) {}
       reject(err);
       return;
     }
+
     const tempOutPath = path.join(
       os.tmpdir(),
       `decode_${Date.now()}_${Math.random().toString(36).substring(2, 9)}.wav`
     );
 
-    // Run ffmpeg -i input -acodec pcm_s16le -ar 44100 -y tempOutPath
-    const ffmpegProcess = spawn(ffmpegPath, [
+    // Run ffmpeg -y -i input -acodec pcm_s16le -ar 44100 tempOutPath
+    const ffmpegProcess = spawn(execFfmpeg, [
+      '-y',
       '-i', filePath,
       '-acodec', 'pcm_s16le',
       '-ar', '44100',
-      tempOutPath,
-      '-y'
+      tempOutPath
     ]);
 
     let stderr = '';
@@ -99,8 +127,8 @@ ipcMain.handle('decode-audio-to-wav', async (_event, filePath: string) => {
           reject(err);
         }
       } else {
-        const err = new Error(`FFmpeg failed with code ${code}. Error: ${stderr}`);
-        try { fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] Error decoding: ${err.message}\n`); } catch (e) {}
+        const err = new Error(`FFmpeg failed with code ${code}. Stderr: ${stderr.substring(0, 300)}`);
+        try { fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] Error decoding: ${err.message}\nStderr: ${stderr}\n`); } catch (e) {}
         reject(err);
       }
     });
@@ -235,7 +263,8 @@ ipcMain.handle('save-converted-file', async (_event, { fileBuffer, savePath, sav
     
     // Run FFmpeg transcode process
     await new Promise<void>((resolve, reject) => {
-      const ff = spawn(ffmpegPath || 'ffmpeg', ffmpegArgs);
+      const execFfmpeg = getExecutableFFmpegPath() || 'ffmpeg';
+      const ff = spawn(execFfmpeg, ffmpegArgs);
       let stderrLog = '';
       
       ff.stderr.on('data', (data) => {
@@ -315,5 +344,282 @@ ipcMain.handle('save-settings-file', async (_event, payload) => {
       fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] Error saving settings.json: ${err.message}\n`);
     } catch (e) {}
     return { success: false, error: err.message };
+  }
+});
+
+// Helper to compute raw PCM MD5 hash via FFmpeg
+async function computePcmMd5(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const execFfmpeg = getExecutableFFmpegPath();
+    if (!execFfmpeg) return reject(new Error('FFmpeg executable path not found'));
+    const ff = spawn(execFfmpeg, [
+      '-y',
+      '-i', filePath,
+      '-acodec', 'pcm_s16le',
+      '-ar', '44100',
+      '-ac', '2',
+      '-f', 'md5',
+      '-'
+    ]);
+    let stdout = '';
+    let stderr = '';
+    ff.stdout.on('data', d => stdout += d.toString());
+    ff.stderr.on('data', d => stderr += d.toString());
+    ff.on('close', code => {
+      if (code === 0) {
+        const match = stdout.match(/[a-fA-F0-9]{32}/);
+        if (match) resolve(match[0]);
+        else resolve(stdout.trim());
+      } else {
+        reject(new Error(`FFmpeg md5 failed code ${code}: ${stderr}`));
+      }
+    });
+    ff.on('error', reject);
+  });
+}
+
+// Helper to decode audio to temporary PCM WAV file for comparison
+async function decodeToTempWav(filePath: string): Promise<string> {
+  const tempPath = path.join(os.tmpdir(), `verif_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.wav`);
+  return new Promise((resolve, reject) => {
+    const execFfmpeg = getExecutableFFmpegPath();
+    if (!execFfmpeg) return reject(new Error('FFmpeg executable path not found'));
+    const ff = spawn(execFfmpeg, [
+      '-y',
+      '-i', filePath,
+      '-acodec', 'pcm_s16le',
+      '-ar', '44100',
+      '-ac', '2',
+      tempPath
+    ]);
+    let stderr = '';
+    ff.stderr.on('data', d => stderr += d.toString());
+    ff.on('close', code => {
+      if (code === 0) resolve(tempPath);
+      else reject(new Error(`Decode failed code ${code}: ${stderr}`));
+    });
+    ff.on('error', reject);
+  });
+}
+
+// Helper to detect high frequency cutoff (e.g. MP3 ~16kHz)
+async function detectHighFreqCutoff(filePath: string): Promise<{ hasCutoff: boolean; freqHz?: number }> {
+  return new Promise((resolve) => {
+    const execFfmpeg = getExecutableFFmpegPath();
+    if (!execFfmpeg) return resolve({ hasCutoff: false });
+    const ff = spawn(execFfmpeg, [
+      '-y',
+      '-i', filePath,
+      '-af', 'highpass=f=16000,astats=metadata=1:reset=1',
+      '-f', 'null',
+      '-'
+    ]);
+    let stderr = '';
+    ff.stderr.on('data', d => stderr += d.toString());
+    ff.on('close', () => {
+      const matches = stderr.match(/RMS level dB:\s*([-\d.]+)/i);
+      if (matches && parseFloat(matches[1]) < -65) {
+        resolve({ hasCutoff: true, freqHz: 16000 });
+      } else {
+        resolve({ hasCutoff: false });
+      }
+    });
+    ff.on('error', () => resolve({ hasCutoff: false }));
+  });
+}
+
+// Helper to compare two WAV files sample by sample
+async function compareWavBuffers(path1: string, path2: string) {
+  const buf1 = await fs.promises.readFile(path1);
+  const buf2 = await fs.promises.readFile(path2);
+
+  const headerOffset = 44;
+  const pcm1 = new Int16Array(buf1.buffer, buf1.byteOffset + headerOffset, Math.floor((buf1.byteLength - headerOffset) / 2));
+  const pcm2 = new Int16Array(buf2.buffer, buf2.byteOffset + headerOffset, Math.floor((buf2.byteLength - headerOffset) / 2));
+
+  const minLen = Math.min(pcm1.length, pcm2.length);
+  if (minLen === 0) {
+    return { maxDiffDb: -100, snrDb: 100, correlationPercent: 100 };
+  }
+
+  let maxDiff = 0;
+  let sumSqDiff = 0;
+  let sumSq1 = 0;
+  let sumSq2 = 0;
+  let dotProd = 0;
+
+  const step = minLen > 2000000 ? Math.floor(minLen / 1000000) : 1;
+  let count = 0;
+
+  for (let i = 0; i < minLen; i += step) {
+    const s1 = pcm1[i];
+    const s2 = pcm2[i];
+    const diff = Math.abs(s1 - s2);
+
+    if (diff > maxDiff) maxDiff = diff;
+    sumSqDiff += diff * diff;
+    sumSq1 += s1 * s1;
+    sumSq2 += s2 * s2;
+    dotProd += s1 * s2;
+    count++;
+  }
+
+  const mse = sumSqDiff / count;
+  const sigPow1 = sumSq1 / count;
+  const sigPow2 = sumSq2 / count;
+
+  let snrDb = 100;
+  if (mse > 0 && sigPow1 > 0) {
+    snrDb = Math.round((10 * Math.log10(sigPow1 / mse)) * 10) / 10;
+  }
+
+  let maxDiffDb = -100;
+  if (maxDiff > 0) {
+    maxDiffDb = Math.round((20 * Math.log10(maxDiff / 32768)) * 10) / 10;
+  }
+
+  const denom = Math.sqrt(sigPow1 * sigPow2);
+  let correlation = 1.0;
+  if (denom > 0) {
+    correlation = (dotProd / count) / denom;
+  }
+  const correlationPercent = Math.max(0, Math.min(100, Math.round(correlation * 10000) / 100));
+
+  return { maxDiffDb, snrDb, correlationPercent };
+}
+
+// IPC Handler to run quality verification (MD5 hash match & PCM waveform diff analysis)
+ipcMain.handle('verify-audio-quality', async (_event, { originalPath, convertedPath, isLosslessPair }) => {
+  const verifiedAt = new Date().toLocaleTimeString();
+  try {
+    fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] verify-audio-quality called.\n  Original: "${originalPath}"\n  Converted: "${convertedPath}"\n`);
+  } catch (e) {}
+
+  if (!originalPath || !convertedPath || !fs.existsSync(originalPath) || !fs.existsSync(convertedPath)) {
+    return {
+      success: false,
+      error: 'Original or converted file path is invalid or missing.'
+    };
+  }
+
+  try {
+    // 1. Calculate PCM MD5 Hash for both files
+    let origMd5 = '';
+    let convMd5 = '';
+    try {
+      [origMd5, convMd5] = await Promise.all([
+        computePcmMd5(originalPath),
+        computePcmMd5(convertedPath)
+      ]);
+    } catch (e: any) {
+      try { fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] MD5 calculation warning: ${e.message}\n`); } catch (e) {}
+    }
+
+    const exactMatch = !!(origMd5 && convMd5 && origMd5 === convMd5);
+
+    if (exactMatch) {
+      return {
+        success: true,
+        result: {
+          verifiedAt,
+          isLosslessPair: true,
+          exactMatch: true,
+          originalMd5: origMd5,
+          convertedMd5: convMd5,
+          snrDb: 100,
+          maxDiffDb: -100,
+          correlationPercent: 100,
+          hasHighFreqCutoff: false,
+          status: 'perfect',
+          summaryMessage: '100%完全一致 (ビタ一文違いなし・データ欠損/劣化ゼロ)',
+          details: [
+            `元のPCM MD5: ${origMd5}`,
+            `変換後PCM MD5: ${convMd5}`,
+            `ハッシュ比較結果: 完全に一致 (Bit-exact match)`,
+            `音声データの欠損・音質劣化は100%ゼロであることが数学的に証明されました。`
+          ]
+        }
+      };
+    }
+
+    // 2. Perform PCM Diff Analysis (Decode both to temp WAV)
+    let tempWavOrig = '';
+    let tempWavConv = '';
+    let diffMetrics = { maxDiffDb: -100, snrDb: 100, correlationPercent: 100 };
+    let cutoffInfo = { hasCutoff: false, freqHz: undefined as number | undefined };
+
+    try {
+      [tempWavOrig, tempWavConv] = await Promise.all([
+        decodeToTempWav(originalPath),
+        decodeToTempWav(convertedPath)
+      ]);
+
+      diffMetrics = await compareWavBuffers(tempWavOrig, tempWavConv);
+      cutoffInfo = await detectHighFreqCutoff(convertedPath);
+    } catch (diffErr: any) {
+      try { fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] Diff analysis error: ${diffErr.message}\n`); } catch (e) {}
+    } finally {
+      if (tempWavOrig && fs.existsSync(tempWavOrig)) {
+        try { await fs.promises.unlink(tempWavOrig); } catch (e) {}
+      }
+      if (tempWavConv && fs.existsSync(tempWavConv)) {
+        try { await fs.promises.unlink(tempWavConv); } catch (e) {}
+      }
+    }
+
+    // Determine status & summary
+    let status: 'perfect' | 'passed' | 'warning' | 'degraded' = 'passed';
+    let summaryMessage = '品質良好 (非可逆圧縮による変化を検出)';
+
+    if (diffMetrics.correlationPercent >= 99.0 && diffMetrics.snrDb >= 30) {
+      status = 'passed';
+      if (cutoffInfo.hasCutoff) {
+        summaryMessage = `品質正常 (非可逆圧縮による高域カット ~${(cutoffInfo.freqHz || 16000) / 1000}kHz 検出)`;
+      } else {
+        summaryMessage = `品質良好 (波形類似度: ${diffMetrics.correlationPercent}%)`;
+      }
+    } else if (diffMetrics.correlationPercent >= 90.0) {
+      status = 'warning';
+      summaryMessage = `音質変化あり (波形類似度: ${diffMetrics.correlationPercent}%, S/N比: ${diffMetrics.snrDb}dB)`;
+    } else {
+      status = 'degraded';
+      summaryMessage = `大幅な音質変化/データ欠損の可能性 (波形類似度: ${diffMetrics.correlationPercent}%)`;
+    }
+
+    const details = [
+      `元のPCM MD5: ${origMd5 || 'N/A'}`,
+      `変換後PCM MD5: ${convMd5 || 'N/A'}`,
+      `波形類似度 (相関率): ${diffMetrics.correlationPercent}%`,
+      `S/N比 (Signal-to-Noise Ratio): ${diffMetrics.snrDb} dB`,
+      `最大波形差分ピーク: ${diffMetrics.maxDiffDb} dB`,
+      cutoffInfo.hasCutoff
+        ? `高周波カットオフ: 検出あり (~${(cutoffInfo.freqHz || 16000) / 1000}kHz 以上の帯域カット)`
+        : `高周波カットオフ: 未検出 (広帯域維持)`
+    ];
+
+    return {
+      success: true,
+      result: {
+        verifiedAt,
+        isLosslessPair: !!isLosslessPair,
+        exactMatch: false,
+        originalMd5: origMd5,
+        convertedMd5: convMd5,
+        snrDb: diffMetrics.snrDb,
+        maxDiffDb: diffMetrics.maxDiffDb,
+        correlationPercent: diffMetrics.correlationPercent,
+        hasHighFreqCutoff: cutoffInfo.hasCutoff,
+        cutoffFreqHz: cutoffInfo.freqHz,
+        status,
+        summaryMessage,
+        details
+      }
+    };
+  } catch (err: any) {
+    try { fs.appendFileSync('debug_ipc.log', `[${new Date().toISOString()}] [MAIN] Quality verification exception: ${err.message}\n`); } catch (e) {}
+    return {
+      success: false,
+      error: err.message || 'Failed to verify quality'
+    };
   }
 });

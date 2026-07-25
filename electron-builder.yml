@@ -15,6 +15,7 @@ mac:
 win:
   target:
     - nsis
+    - zip
 linux:
   target:
     - AppImage

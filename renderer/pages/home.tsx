@@ -8,7 +8,8 @@ import Head from 'next/head';
 import { useAudioConverter } from '../context/AudioConverterContext';
 import { 
   FileAudio, Upload, Trash2, Sliders, Volume2, 
-  Plus, X, Save, Settings, Info, RefreshCw, AlertCircle
+  Plus, X, Save, Settings, Info, RefreshCw, AlertCircle,
+  ShieldCheck
 } from '../components/Icons';
 import { estimateOutputSize } from '../utils/audioEncoder';
 import { MetadataTags } from '../types';
@@ -28,6 +29,8 @@ export default function HomeDashboardPage() {
     handleStartConversion,
     handleCancelConversion,
     handleUpdateTags,
+    handleVerifyQuality,
+    handleResetQueueStatus,
 
     // Multi-tab extensions
     tabs,
@@ -55,7 +58,7 @@ export default function HomeDashboardPage() {
   const [editingTabName, setEditingTabName] = useState<string>('');
   
   // UI Panels states
-  const [bottomTab, setBottomTab] = useState<'source' | 'metadata' | 'log'>('source');
+  const [bottomTab, setBottomTab] = useState<'source' | 'metadata' | 'quality' | 'log'>('source');
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [showDebugLogs, setShowDebugLogs] = useState(false);
@@ -689,6 +692,15 @@ export default function HomeDashboardPage() {
             >
               {t(lang, 'clearQueue')}
             </button>
+            <button
+              onClick={() => handleResetQueueStatus()}
+              disabled={files.length === 0}
+              title={t(lang, 'resetQueueTooltip')}
+              className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 disabled:opacity-30 border border-zinc-800 rounded text-zinc-200 hover:text-emerald-400 transition-colors flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className="h-3.5 w-3.5 text-cyan-400" />
+              <span>{t(lang, 'resetQueueBtn')}</span>
+            </button>
 
           </div>
 
@@ -907,9 +919,43 @@ export default function HomeDashboardPage() {
                               </div>
                             </div>
                           ) : file.status === 'completed' ? (
-                            <span className="px-2 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-md text-[9px] font-bold">
-                              FINISHED
-                            </span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="px-1.5 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-md text-[9px] font-bold">
+                                FINISHED
+                              </span>
+                              {file.isVerifying ? (
+                                <span className="px-1.5 py-0.5 bg-zinc-800 text-zinc-400 rounded-md text-[9px] flex items-center gap-1 animate-pulse">
+                                  <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                                  <span>検証中</span>
+                                </span>
+                              ) : file.verificationResult ? (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedFileId(file.id);
+                                    setBottomTab('quality');
+                                  }}
+                                  className={`px-1.5 py-0.5 rounded-md text-[9px] font-bold border transition-colors cursor-pointer ${
+                                    file.verificationResult.exactMatch
+                                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
+                                      : file.verificationResult.status === 'passed'
+                                      ? 'bg-blue-500/20 text-blue-300 border-blue-500/40 hover:bg-blue-500/30'
+                                      : file.verificationResult.status === 'warning'
+                                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
+                                      : 'bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30'
+                                  }`}
+                                  title="品質検証レポートを表示"
+                                >
+                                  {file.verificationResult.exactMatch
+                                    ? '✨100%完全一致'
+                                    : file.verificationResult.status === 'passed'
+                                    ? '🟢品質正常'
+                                    : file.verificationResult.status === 'warning'
+                                    ? '⚠️変化あり'
+                                    : '🔴劣化検出'}
+                                </button>
+                              ) : null}
+                            </div>
                           ) : file.status === 'failed' ? (
                             <span className="px-2 py-0.5 bg-rose-500/10 text-rose-400 border border-rose-500/20 rounded-md text-[9px] font-bold" title={file.error}>
                               ERROR
@@ -963,11 +1009,13 @@ export default function HomeDashboardPage() {
         <div className="bg-zinc-900 border-t border-zinc-800 flex flex-col shrink-0 overflow-hidden h-[300px]">
           {/* Tab Selector bar */}
           <div className="bg-zinc-900 border-b border-zinc-800 px-4 flex items-center shrink-0 h-9">
-            {(['source', 'metadata', 'log'] as const).map((tab) => {
+            {(['source', 'metadata', 'quality', 'log'] as const).map((tab) => {
               const label = tab === 'source' 
                 ? t(lang, 'tabSourceFile') 
                 : tab === 'metadata' 
                 ? t(lang, 'tabMetadata') 
+                : tab === 'quality'
+                ? t(lang, 'tabQuality')
                 : t(lang, 'tabLog');
               const isActive = bottomTab === tab;
               return (
@@ -981,6 +1029,11 @@ export default function HomeDashboardPage() {
                   }`}
                 >
                   {label}
+                  {tab === 'quality' && selectedFile?.verificationResult && (
+                    <span className={`absolute top-1.5 right-1 h-1.5 w-1.5 rounded-full ${
+                      selectedFile.verificationResult.exactMatch ? 'bg-emerald-400' : 'bg-blue-400'
+                    }`}></span>
+                  )}
                   {tab === 'log' && logs.length > 0 && (
                     <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
                   )}
@@ -1104,17 +1157,36 @@ export default function HomeDashboardPage() {
                   </div>
 
                   <div className="pt-2 border-t border-zinc-900 space-y-2">
-                    <span className="text-[10px] text-zinc-500 font-mono font-semibold block">{t(lang, 'outputSettings')}</span>
-                    <div className="grid grid-cols-2 gap-2 text-zinc-400">
-                      <label className="flex items-center gap-2 cursor-pointer hover:text-zinc-200">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-zinc-500 font-mono font-semibold block">{t(lang, 'outputSettings')}</span>
+                      <label className="flex items-center gap-1.5 cursor-pointer text-emerald-400 font-bold bg-emerald-950/40 border border-emerald-800/60 px-2 py-0.5 rounded text-[10px] hover:bg-emerald-900/40 transition">
                         <input
                           type="checkbox"
-                          checked={settings.normalize}
+                          checked={settings.sameAsSource}
+                          onChange={(e) => updateSetting('sameAsSource', e.target.checked)}
+                          className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500 cursor-pointer h-3 w-3"
+                        />
+                        <span>{t(lang, 'sameAsSource')}</span>
+                      </label>
+                    </div>
+
+                    {settings.sameAsSource && (
+                      <div className="text-[9px] text-emerald-400/90 bg-emerald-950/20 border border-emerald-900/40 px-2 py-1 rounded italic leading-tight">
+                        💡 {t(lang, 'sameAsSourceHint')}
+                      </div>
+                    )}
+
+                    <div className={`grid grid-cols-2 gap-2 text-zinc-400 transition-all ${settings.sameAsSource ? 'opacity-40 pointer-events-none' : ''}`}>
+                      <label className={`flex items-center gap-2 ${settings.sameAsSource ? 'cursor-not-allowed' : 'cursor-pointer hover:text-zinc-200'}`}>
+                        <input
+                          type="checkbox"
+                          disabled={settings.sameAsSource}
+                          checked={settings.sameAsSource ? false : settings.normalize}
                           onChange={(e) => updateSetting('normalize', e.target.checked)}
                           className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500 cursor-pointer"
                         />
                         <span>{t(lang, 'normalize')}</span>
-                        {settings.normalize && (
+                        {settings.normalize && !settings.sameAsSource && (
                           <span className="text-[10px] font-bold text-amber-500">({settings.normalizationTargetDb} dB)</span>
                         )}
                       </label>
@@ -1126,10 +1198,11 @@ export default function HomeDashboardPage() {
                         <input type="checkbox" disabled className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500" />
                         <span>{t(lang, 'fade')}</span>
                       </label>
-                      <label className="flex items-center gap-2 cursor-pointer hover:text-zinc-200">
+                      <label className={`flex items-center gap-2 ${settings.sameAsSource ? 'cursor-not-allowed' : 'cursor-pointer hover:text-zinc-200'}`}>
                         <input
                           type="checkbox"
-                          checked={settings.trimSilence}
+                          disabled={settings.sameAsSource}
+                          checked={settings.sameAsSource ? false : settings.trimSilence}
                           onChange={(e) => updateSetting('trimSilence', e.target.checked)}
                           className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500 cursor-pointer"
                         />
@@ -1137,7 +1210,7 @@ export default function HomeDashboardPage() {
                       </label>
                     </div>
                     {/* Normalizer Target Adjustment */}
-                    {settings.normalize && (
+                    {settings.normalize && !settings.sameAsSource && (
                       <div className="flex items-center gap-3 bg-zinc-900/40 p-1.5 rounded border border-zinc-900">
                         <span className="text-[9px] font-mono text-zinc-500 uppercase">{t(lang, 'targetDb')}</span>
                         <input
@@ -1449,6 +1522,125 @@ export default function HomeDashboardPage() {
                 </div>
               )}
 
+            {/* 3. QUALITY AUDIT TAB */}
+            {bottomTab === 'quality' && (
+              <div className="h-full flex flex-col space-y-3 font-mono text-xs">
+                <div className="flex items-center justify-between border-b border-zinc-900 pb-2 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 text-emerald-400" />
+                    <span className="font-bold text-white text-xs">{t(lang, 'qualityTitle')}</span>
+                  </div>
+                  {selectedFile && (
+                    <button
+                      onClick={() => handleVerifyQuality(selectedFile.id)}
+                      disabled={selectedFile.isVerifying || !selectedFile.path}
+                      className="px-3 py-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded text-[11px] font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-30 cursor-pointer"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${selectedFile.isVerifying ? 'animate-spin' : ''}`} />
+                      <span>{selectedFile.isVerifying ? t(lang, 'verifyingText') : t(lang, 'reverifyBtn')}</span>
+                    </button>
+                  )}
+                </div>
+
+                {!selectedFile ? (
+                  <div className="flex-1 flex items-center justify-center text-zinc-500 text-xs py-8">
+                    {t(lang, 'qualitySelectTrackDesc')}
+                  </div>
+                ) : !selectedFile.verificationResult ? (
+                  <div className="flex-1 flex flex-col items-center justify-center text-zinc-500 text-xs py-8 space-y-3">
+                    <p>{lang === 'ja' ? 'このファイルの品質検証レポートはまだ生成されていません。' : 'No quality report available for this track.'}</p>
+                    <button
+                      onClick={() => handleVerifyQuality(selectedFile.id)}
+                      disabled={selectedFile.isVerifying || !selectedFile.path}
+                      className="px-4 py-1.5 bg-emerald-600 text-white font-bold rounded text-xs hover:bg-emerald-500 transition-colors flex items-center gap-2 cursor-pointer"
+                    >
+                      <ShieldCheck className="h-4 w-4" />
+                      <span>{selectedFile.isVerifying ? t(lang, 'verifyingText') : t(lang, 'reverifyBtn')}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 flex-1 overflow-y-auto pr-1">
+                    {/* Overall Summary Card */}
+                    <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 space-y-2.5">
+                      <div className="flex items-center justify-between border-b border-zinc-800/60 pb-2">
+                        <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider">検証ステータス & 判定サマリー</span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          selectedFile.verificationResult.status === 'perfect'
+                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                            : selectedFile.verificationResult.status === 'passed'
+                            ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
+                            : selectedFile.verificationResult.status === 'warning'
+                            ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                            : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                        }`}>
+                          {selectedFile.verificationResult.exactMatch
+                            ? t(lang, 'qualityBadgePerfect')
+                            : selectedFile.verificationResult.status === 'passed'
+                            ? t(lang, 'qualityBadgePassed')
+                            : selectedFile.verificationResult.status === 'warning'
+                            ? t(lang, 'qualityBadgeWarning')
+                            : t(lang, 'qualityBadgeDegraded')}
+                        </span>
+                      </div>
+
+                      <div className="text-white text-xs font-semibold">
+                        {selectedFile.verificationResult.summaryMessage}
+                      </div>
+
+                      <div className="space-y-1.5 pt-2 border-t border-zinc-800/40 text-[11px]">
+                        <div className="flex justify-between">
+                          <span className="text-zinc-500">波形類似度 (相関率):</span>
+                          <span className="text-emerald-400 font-bold">{selectedFile.verificationResult.correlationPercent}%</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-zinc-500">S/N比 (Signal-to-Noise Ratio):</span>
+                          <span className="text-zinc-200 font-mono">{selectedFile.verificationResult.snrDb} dB</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-zinc-500">最大波形差分 (Peak Difference):</span>
+                          <span className="text-zinc-200 font-mono">{selectedFile.verificationResult.maxDiffDb} dB</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-zinc-500">高音域カットオフ (Cutoff):</span>
+                          <span className={selectedFile.verificationResult.hasHighFreqCutoff ? 'text-amber-400 font-bold' : 'text-zinc-400'}>
+                            {selectedFile.verificationResult.hasHighFreqCutoff ? `検出あり (~${(selectedFile.verificationResult.cutoffFreqHz || 16000)/1000}kHz)` : '未検出 (広帯域維持)'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Detailed Logs & MD5 Compare Card */}
+                    <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 space-y-2.5">
+                      <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider block border-b border-zinc-800/60 pb-2">PCM MD5 ハッシュ比較 & 診断ログ</span>
+                      
+                      <div className="space-y-1 text-[10px]">
+                        <div className="text-zinc-400">元PCM MD5:</div>
+                        <div className="bg-zinc-950 px-2 py-1 rounded text-zinc-300 font-mono border border-zinc-850 truncate select-all">
+                          {selectedFile.verificationResult.originalMd5 || 'N/A'}
+                        </div>
+                        <div className="text-zinc-400 pt-1">変換後PCM MD5:</div>
+                        <div className="bg-zinc-950 px-2 py-1 rounded text-zinc-300 font-mono border border-zinc-850 truncate select-all">
+                          {selectedFile.verificationResult.convertedMd5 || 'N/A'}
+                        </div>
+                      </div>
+
+                      <div className="pt-2 border-t border-zinc-800/40 space-y-1">
+                        <span className="text-[10px] text-zinc-500 uppercase font-mono block">検証詳細:</span>
+                        <ul className="space-y-1 text-[10px] text-zinc-400">
+                          {selectedFile.verificationResult.details.map((detail, dIdx) => (
+                            <li key={dIdx} className="flex items-start gap-1.5">
+                              <span className="text-emerald-500">•</span>
+                              <span>{detail}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
               {isConverting ? (
                 <button
                   onClick={handleCancelConversion}
@@ -1503,13 +1695,22 @@ export default function HomeDashboardPage() {
               </div>
 
               <div className="space-y-3.5">
+                {settings.sameAsSource && (
+                  <div className="p-2 bg-emerald-950/30 border border-emerald-800/50 rounded text-emerald-400 text-[10px] italic">
+                    {lang === 'ja' 
+                      ? '💡 ソース品質維持 (Same as Source) が有効なため、元音源のサンプリングレートおよび解像度が自動適用されます。'
+                      : '💡 Same as Source mode is active. Original sampling rate & resolution will be preserved.'
+                    }
+                  </div>
+                )}
                 {/* Sample Rate selection */}
-                <div className="space-y-1.5">
+                <div className={`space-y-1.5 ${settings.sameAsSource ? 'opacity-40 pointer-events-none' : ''}`}>
                   <label className="text-zinc-450 text-[10px] font-mono text-zinc-550 block">{t(lang, 'samplingRate')}</label>
                   <div className="grid grid-cols-5 gap-1">
                     {[22050, 44100, 48000, 88200, 96000].map((rate) => (
                       <button
                         key={rate}
+                        disabled={settings.sameAsSource}
                         onClick={() => updateSetting('sampleRate', rate as any)}
                         className={`py-1 rounded font-mono text-[10px] border transition-all cursor-pointer ${
                           settings.sampleRate === rate
@@ -1539,12 +1740,13 @@ export default function HomeDashboardPage() {
 
                 {/* Bitrate or Bit Depth selection */}
                 {settings.outputFormat === 'WAV' || settings.outputFormat === 'FLAC' ? (
-                  <div className="space-y-1.5">
+                  <div className={`space-y-1.5 ${settings.sameAsSource ? 'opacity-40 pointer-events-none' : ''}`}>
                     <label className="text-zinc-450 text-[10px] font-mono text-zinc-550 block">{t(lang, 'bitDepth')}</label>
                     <div className="grid grid-cols-3 gap-1.5">
                       {['16', '24', '32'].map((depth) => (
                         <button
                           key={depth}
+                          disabled={settings.sameAsSource}
                           onClick={() => updateSetting('bitDepth', depth as any)}
                           className={`py-1.5 rounded font-mono text-[11px] border transition-all cursor-pointer ${
                             settings.bitDepth === depth

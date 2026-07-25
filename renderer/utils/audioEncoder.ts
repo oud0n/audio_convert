@@ -15,7 +15,7 @@ export function bufferToWav(
   onProgress?: (progress: number) => void
 ): ArrayBuffer {
   const numberOfChannels = Math.min(audioBuffer.numberOfChannels, settings.channels);
-  const sampleRate = settings.sampleRate;
+  const sampleRate = settings.sameAsSource ? audioBuffer.sampleRate : settings.sampleRate;
   const bitDepth = parseInt(settings.bitDepth) as 16 | 24 | 32;
 
   // 1. Calculate Peak and RMS for normalization if needed
@@ -30,20 +30,22 @@ export function bufferToWav(
     }
   }
 
-  // 2. Compute Gain multiplier based on normalization & volume boost
+  // 2. Compute Gain multiplier based on normalization & volume boost (bypassed if sameAsSource)
   let gain = 1.0;
   
-  // Apply manual volume boost first
-  if (settings.volumeBoostDb !== 0) {
-    gain *= Math.pow(10, settings.volumeBoostDb / 20);
-  }
+  if (!settings.sameAsSource) {
+    // Apply manual volume boost first
+    if (settings.volumeBoostDb !== 0) {
+      gain *= Math.pow(10, settings.volumeBoostDb / 20);
+    }
 
-  // Apply normalization if enabled
-  if (settings.normalize && peakVal > 0) {
-    // Normalization target amp (e.g., -1dB -> ~0.891)
-    const targetAmp = Math.pow(10, settings.normalizationTargetDb / 20);
-    // Adjust gain so peak matches target
-    gain = targetAmp / peakVal;
+    // Apply normalization if enabled
+    if (settings.normalize && peakVal > 0) {
+      // Normalization target amp (e.g., -1dB -> ~0.891)
+      const targetAmp = Math.pow(10, settings.normalizationTargetDb / 20);
+      // Adjust gain so peak matches target
+      gain = targetAmp / peakVal;
+    }
   }
 
   // 3. Setup resampling (Linear Interpolation)

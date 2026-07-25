@@ -41,6 +41,8 @@ export default function SettingsPage() {
         threadPoolSize: 4,
         ffmpegHighSpeed: true,
         autoRemoveCompleted: false,
+        autoVerifyQuality: true,
+        sameAsSource: false,
         electronDesktopMode: true,
         deleteOriginalAfterConvert: false,
         saveInSourceFolder: true,
@@ -69,6 +71,8 @@ export default function SettingsPage() {
         threadPoolSize: 4,
         ffmpegHighSpeed: true,
         autoRemoveCompleted: true,
+        autoVerifyQuality: true,
+        sameAsSource: false,
         electronDesktopMode: true,
         deleteOriginalAfterConvert: true, // Delete voice memos after conversion
         saveInSourceFolder: true,
@@ -79,7 +83,7 @@ export default function SettingsPage() {
     },
     {
       id: 'factory-flac-archive',
-      name: 'Archival FLAC',
+      name: 'Archival FLAC (Same as Source)',
       isCustom: false,
       settings: {
         outputFormat: 'FLAC',
@@ -97,6 +101,8 @@ export default function SettingsPage() {
         threadPoolSize: 8,
         ffmpegHighSpeed: false, // Maximum filter quality
         autoRemoveCompleted: false,
+        autoVerifyQuality: true,
+        sameAsSource: true,
         electronDesktopMode: false,
         deleteOriginalAfterConvert: false,
         saveInSourceFolder: false,
@@ -336,13 +342,34 @@ export default function SettingsPage() {
                 </p>
               </div>
 
+              {/* Same as Source mode toggle */}
+              <div className="flex items-center justify-between p-2.5 bg-emerald-950/20 border border-emerald-800/40 rounded-lg">
+                <div className="space-y-0.5">
+                  <span className="text-xs text-emerald-400 font-bold block">Same as Source (Lossless Quality)</span>
+                  <span className="text-[10px] text-zinc-400 font-mono leading-tight block">Preserves original sample rate & depth. Automatically bypasses normalization.</span>
+                </div>
+                <button
+                  onClick={() => updateSetting('sameAsSource', !settings.sameAsSource)}
+                  className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                    settings.sameAsSource ? 'bg-emerald-600' : 'bg-zinc-800'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                      settings.sameAsSource ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
+
               {/* Sample Rate */}
-              <div className="space-y-1.5">
+              <div className={`space-y-1.5 ${settings.sameAsSource ? 'opacity-40 pointer-events-none' : ''}`}>
                 <label className="text-xs text-zinc-400 font-mono">SAMPLE RATE</label>
                 <div className="grid grid-cols-5 gap-1.5">
                   {sampleRates.map((sr) => (
                     <button
                       key={sr}
+                      disabled={settings.sameAsSource}
                       onClick={() => updateSetting('sampleRate', sr as any)}
                       className={`py-1.5 rounded text-xs font-mono border transition-all cursor-pointer ${
                         settings.sampleRate === sr
@@ -372,9 +399,10 @@ export default function SettingsPage() {
                 </div>
 
                 {settings.outputFormat === 'WAV' || settings.outputFormat === 'FLAC' ? (
-                  <div className="space-y-1.5">
+                  <div className={`space-y-1.5 ${settings.sameAsSource ? 'opacity-40 pointer-events-none' : ''}`}>
                     <label className="text-xs text-zinc-400 font-mono">BIT DEPTH</label>
                     <select
+                      disabled={settings.sameAsSource}
                       value={settings.bitDepth}
                       onChange={(e) => updateSetting('bitDepth', e.target.value as any)}
                       className="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
@@ -406,7 +434,7 @@ export default function SettingsPage() {
             </div>
 
             {/* Card 2: DSP & Normalizer */}
-            <div className="bg-zinc-900 border border-zinc-800/80 rounded-xl p-5 space-y-4">
+            <div className={`bg-zinc-900 border border-zinc-800/80 rounded-xl p-5 space-y-4 transition-all ${settings.sameAsSource ? 'opacity-40 pointer-events-none' : ''}`}>
               <div className="flex items-center gap-2.5 text-white font-medium pb-2 border-b border-zinc-800/40">
                 <Volume2 className="h-4.5 w-4.5 text-emerald-400" />
                 <span>Normalizer & Volume Gain</span>
@@ -419,14 +447,15 @@ export default function SettingsPage() {
                   <span className="text-[10px] text-zinc-500 font-mono leading-tight block">Peak-normalization algorithm (EBU R128 scaling)</span>
                 </div>
                 <button
+                  disabled={settings.sameAsSource}
                   onClick={() => updateSetting('normalize', !settings.normalize)}
                   className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
-                    settings.normalize ? 'bg-emerald-600' : 'bg-zinc-800'
+                    settings.normalize && !settings.sameAsSource ? 'bg-emerald-600' : 'bg-zinc-800'
                   }`}
                 >
                   <span
                     className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
-                      settings.normalize ? 'translate-x-5' : 'translate-x-0'
+                      settings.normalize && !settings.sameAsSource ? 'translate-x-5' : 'translate-x-0'
                     }`}
                   />
                 </button>
@@ -547,6 +576,31 @@ export default function SettingsPage() {
                   </p>
                 </div>
               )}
+
+              {/* Auto Quality Verification Toggle */}
+              <div className="flex items-center justify-between pt-2 border-t border-zinc-800/40">
+                <div className="space-y-0.5">
+                  <span className="text-xs text-zinc-300 font-semibold block flex items-center gap-1.5">
+                    <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>Auto Quality & Data Loss Verification</span>
+                  </span>
+                  <span className="text-[10px] text-zinc-500 font-mono leading-tight block">
+                    Verify PCM MD5 bit-exact match & signal degradation after conversion
+                  </span>
+                </div>
+                <button
+                  onClick={() => updateSetting('autoVerifyQuality', !settings.autoVerifyQuality)}
+                  className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                    settings.autoVerifyQuality ? 'bg-emerald-600' : 'bg-zinc-800'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                      settings.autoVerifyQuality ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+              </div>
 
               {/* Delete Original after Conversion */}
               <div className="flex items-center justify-between pt-2 border-t border-zinc-800/40">
