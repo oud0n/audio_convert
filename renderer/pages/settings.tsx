@@ -10,7 +10,7 @@ import {
   Sliders, Volume2, Cpu, Bell, ShieldCheck, Zap, Laptop, 
   Folder, Plus, Trash, FileText, Sparkles 
 } from '../components/Icons';
-import { ConverterSettings, SettingsPreset } from '../types';
+import { ConverterSettings, SettingsPreset, getFormatExtension } from '../types';
 
 export default function SettingsPage() {
   const { settings, setSettings } = useAudioConverter();
@@ -144,7 +144,6 @@ export default function SettingsPage() {
     }
     setNewPresetName('');
     setSelectedPresetId(newPreset.id);
-    alert(`Preset "${newPreset.name}" successfully saved to local storage!`);
   };
 
   const deleteCustomPreset = (id: string, e: React.MouseEvent) => {
@@ -189,7 +188,7 @@ export default function SettingsPage() {
     outputName = outputName.replace('{track}', '04');
     outputName = outputName.replace('{year}', '2026');
     outputName = outputName.replace('{genre}', 'Electronic');
-    return `${outputName}.${settings.outputFormat.toLowerCase()}`;
+    return `${outputName}.${getFormatExtension(settings.outputFormat)}`;
   };
 
   return (
@@ -398,7 +397,7 @@ export default function SettingsPage() {
                   </select>
                 </div>
 
-                {settings.outputFormat === 'WAV' || settings.outputFormat === 'FLAC' ? (
+                {['WAV', 'FLAC', 'ALAC'].includes((settings.outputFormat || '').toUpperCase()) ? (
                   <div className={`space-y-1.5 ${settings.sameAsSource ? 'opacity-40 pointer-events-none' : ''}`}>
                     <label className="text-xs text-zinc-400 font-mono">BIT DEPTH</label>
                     <select
@@ -653,35 +652,41 @@ export default function SettingsPage() {
               </div>
 
               {/* Pattern Input and Preview */}
-              {settings.renameByTags && (
-                <div className="space-y-3 pt-1">
-                  <div className="space-y-1">
-                    <label className="text-xs text-zinc-400 font-mono block">RENAME STRING PATTERN</label>
-                    <input
-                      type="text"
-                      value={settings.renamePattern}
-                      onChange={(e) => updateSetting('renamePattern', e.target.value)}
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none"
-                      placeholder="e.g. {artist} - {title}"
-                    />
-                    <div className="flex flex-wrap gap-1 mt-1.5 text-[9px] font-mono text-zinc-500">
-                      <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{artist}'}</span>
-                      <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{title}'}</span>
-                      <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{album}'}</span>
-                      <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{track}'}</span>
-                      <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{year}'}</span>
-                    </div>
-                  </div>
-
-                  {/* File preview simulation */}
-                  <div className="bg-zinc-950 border border-zinc-800/60 p-2.5 rounded font-mono text-xs space-y-1">
-                    <span className="text-[10px] text-zinc-500 uppercase">PREVIEW EXPORT RESOLUTION:</span>
-                    <div className="text-emerald-400 font-semibold truncate">
-                      {getRenamePreview()}
-                    </div>
+              <div className="space-y-3 pt-1">
+                <div className="space-y-1">
+                  <label className="text-xs text-zinc-400 font-mono block">RENAME STRING PATTERN</label>
+                  <input
+                    type="text"
+                    value={settings.renamePattern || ''}
+                    onChange={(e) => {
+                      setSettings((prev) => ({
+                        ...prev,
+                        renamePattern: e.target.value,
+                        renameByTags: true,
+                      }));
+                    }}
+                    className={`w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none ${
+                      !settings.renameByTags ? 'opacity-60' : ''
+                    }`}
+                    placeholder="e.g. {artist} - {title}"
+                  />
+                  <div className="flex flex-wrap gap-1 mt-1.5 text-[9px] font-mono text-zinc-500">
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{artist}'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{title}'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{album}'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{track}'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{year}'}</span>
                   </div>
                 </div>
-              )}
+
+                {/* File preview simulation */}
+                <div className="bg-zinc-950 border border-zinc-800/60 p-2.5 rounded font-mono text-xs space-y-1">
+                  <span className="text-[10px] text-zinc-500 uppercase">PREVIEW EXPORT RESOLUTION:</span>
+                  <div className="text-emerald-400 font-semibold truncate">
+                    {getRenamePreview()}
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Card 5: FFmpeg Engine Settings */}

@@ -3,6 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export function getFormatExtension(fmt: string): string {
+  const upper = (fmt || '').toUpperCase();
+  if (upper === 'ALAC') return 'm4a';
+  return upper.toLowerCase();
+}
+
+
 export interface MetadataTags {
   title: string;
   artist: string;
@@ -34,6 +41,7 @@ export interface QualityVerificationResult {
 export interface AudioFile {
   id: string;
   name: string;
+  outputFileName?: string;
   path?: string; // absolute local path resolved via preload webUtils
   size: number;
   duration: number; // in seconds
@@ -59,7 +67,7 @@ export interface AudioFile {
 }
 
 export interface ConverterSettings {
-  outputFormat: 'WAV' | 'MP3' | 'FLAC' | 'M4A' | 'OGG';
+  outputFormat: 'WAV' | 'MP3' | 'FLAC' | 'M4A' | 'OGG' | 'ALAC' | 'OPUS' | 'AIFF' | 'AC3' | 'WMA' | 'WAVPACK' | string;
   bitrate: '128' | '192' | '256' | '320';
   sampleRate: 22050 | 44100 | 48000 | 88200 | 96000;
   bitDepth: '16' | '24' | '32';
@@ -109,13 +117,10 @@ export interface JobTab {
   selectedFileId: string | null;
 }
 
+import type { IpcHandler } from '../main/preload';
+
 declare global {
   interface Window {
-    ipc: {
-      send: <T>(channel: string, value?: T) => void;
-      on: <T>(channel: string, callback: (...args: T[]) => void) => () => void;
-      invoke: <T = any>(channel: string, ...args: any[]) => Promise<T>;
-      getPathForFile: (file: File) => string;
-    };
+    ipc: IpcHandler;
   }
 }

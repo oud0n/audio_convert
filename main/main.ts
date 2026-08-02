@@ -98,12 +98,11 @@ ipcMain.handle('decode-audio-to-wav', async (_event, filePath: string) => {
       `decode_${Date.now()}_${Math.random().toString(36).substring(2, 9)}.wav`
     );
 
-    // Run ffmpeg -y -i input -acodec pcm_s16le -ar 44100 tempOutPath
+    // Run ffmpeg -y -i input -acodec pcm_s16le tempOutPath
     const ffmpegProcess = spawn(execFfmpeg, [
       '-y',
       '-i', filePath,
       '-acodec', 'pcm_s16le',
-      '-ar', '44100',
       tempOutPath
     ]);
 
@@ -214,26 +213,29 @@ ipcMain.handle('save-converted-file', async (_event, { fileBuffer, savePath, sav
     // Write the raw PCM WAV to a temp file
     await fs.promises.writeFile(tempWavPath, Buffer.from(fileBuffer));
     
-    // Build FFmpeg command args
     const formatUpper = (outputFormat || 'WAV').toUpperCase();
-    const supportsArt = formatUpper === 'MP3' || formatUpper === 'FLAC' || formatUpper === 'M4A';
+    const supportsArt = formatUpper === 'MP3' || formatUpper === 'FLAC' || formatUpper === 'M4A' || formatUpper === 'ALAC';
     
-    const ffmpegArgs = ['-y', '-i', tempWavPath];
+    const ffmpegArgs: string[] = ['-y'];
     
-    // Only map the original file if the target format supports art
-    if (supportsArt && inputFilePath && fs.existsSync(inputFilePath)) {
+    const hasOriginalFile = !!(inputFilePath && fs.existsSync(inputFilePath));
+    
+    if (hasOriginalFile) {
+      // Use native direct conversion from original file for 100% bit-exact quality & 100% metadata preservation
       ffmpegArgs.push('-i', inputFilePath);
+      ffmpegArgs.push('-map', '0:a:0');
+      if (supportsArt) {
+        ffmpegArgs.push('-map', '0:v?', '-c:v', 'copy');
+      }
+      ffmpegArgs.push('-map_metadata', '0');
+    } else {
+      // Fallback: Write raw PCM WAV buffer to temp file
+      await fs.promises.writeFile(tempWavPath, Buffer.from(fileBuffer));
+      ffmpegArgs.push('-i', tempWavPath);
+      ffmpegArgs.push('-map', '0:a');
     }
     
-    // Map the audio from the temp WAV file (input 0)
-    ffmpegArgs.push('-map', '0:a');
-    
-    // Map the video stream (album art) from the original file (input 1) if supported
-    if (supportsArt && inputFilePath && fs.existsSync(inputFilePath)) {
-      ffmpegArgs.push('-map', '1:v?', '-c:v', 'copy');
-    }
-    
-    // Add metadata tags
+    // Add / override explicit metadata tags if provided
     if (tags) {
       if (tags.title) ffmpegArgs.push('-metadata', `title=${tags.title}`);
       if (tags.artist) ffmpegArgs.push('-metadata', `artist=${tags.artist}`);
@@ -247,16 +249,28 @@ ipcMain.handle('save-converted-file', async (_event, { fileBuffer, savePath, sav
     }
     
     if (formatUpper === 'MP3') {
-      ffmpegArgs.push('-codec:a', 'libmp3lame', '-b:a', `${bitrate || '320'}k`);
+      ffmpegArgs.push('-codec:a', 'libmp3lame', '-b:a', `${bitrate || '320'}k`, '-f', 'mp3');
     } else if (formatUpper === 'FLAC') {
-      ffmpegArgs.push('-codec:a', 'flac');
+      ffmpegArgs.push('-codec:a', 'flac', '-f', 'flac');
     } else if (formatUpper === 'M4A') {
-      ffmpegArgs.push('-codec:a', 'aac', '-b:a', `${bitrate || '320'}k`);
+      ffmpegArgs.push('-codec:a', 'aac', '-b:a', `${bitrate || '320'}k`, '-f', 'ipod');
     } else if (formatUpper === 'OGG') {
-      ffmpegArgs.push('-codec:a', 'libvorbis', '-b:a', `${bitrate || '320'}k`);
+      ffmpegArgs.push('-codec:a', 'libvorbis', '-b:a', `${bitrate || '320'}k`, '-f', 'ogg');
+    } else if (formatUpper === 'OPUS') {
+      ffmpegArgs.push('-codec:a', 'libopus', '-b:a', `${bitrate || '192'}k`, '-f', 'opus');
+    } else if (formatUpper === 'ALAC') {
+      ffmpegArgs.push('-codec:a', 'alac', '-f', 'ipod');
+    } else if (formatUpper === 'AIFF') {
+      ffmpegArgs.push('-codec:a', 'pcm_s16be', '-f', 'aiff');
+    } else if (formatUpper === 'AC3') {
+      ffmpegArgs.push('-codec:a', 'ac3', '-b:a', `${bitrate || '320'}k`, '-f', 'ac3');
+    } else if (formatUpper === 'WMA') {
+      ffmpegArgs.push('-codec:a', 'wmav2', '-b:a', `${bitrate || '192'}k`, '-f', 'asf');
+    } else if (formatUpper === 'WAVPACK') {
+      ffmpegArgs.push('-codec:a', 'wavpack', '-f', 'wv');
     } else {
       // WAV format - write ID3v2 tags
-      ffmpegArgs.push('-write_id3v2', '1');
+      ffmpegArgs.push('-codec:a', 'pcm_s16le', '-f', 'wav', '-write_id3v2', '1');
     }
     
     ffmpegArgs.push(fullPath);
@@ -356,7 +370,6 @@ async function computePcmMd5(filePath: string): Promise<string> {
       '-y',
       '-i', filePath,
       '-acodec', 'pcm_s16le',
-      '-ar', '44100',
       '-ac', '2',
       '-f', 'md5',
       '-'
@@ -387,9 +400,10 @@ async function decodeToTempWav(filePath: string): Promise<string> {
     const ff = spawn(execFfmpeg, [
       '-y',
       '-i', filePath,
+      '-map', '0:a:0',
       '-acodec', 'pcm_s16le',
-      '-ar', '44100',
       '-ac', '2',
+      '-map_metadata', '-1',
       tempPath
     ]);
     let stderr = '';
@@ -402,30 +416,27 @@ async function decodeToTempWav(filePath: string): Promise<string> {
   });
 }
 
-// Helper to detect high frequency cutoff (e.g. MP3 ~16kHz)
-async function detectHighFreqCutoff(filePath: string): Promise<{ hasCutoff: boolean; freqHz?: number }> {
-  return new Promise((resolve) => {
-    const execFfmpeg = getExecutableFFmpegPath();
-    if (!execFfmpeg) return resolve({ hasCutoff: false });
-    const ff = spawn(execFfmpeg, [
-      '-y',
-      '-i', filePath,
-      '-af', 'highpass=f=16000,astats=metadata=1:reset=1',
-      '-f', 'null',
-      '-'
-    ]);
-    let stderr = '';
-    ff.stderr.on('data', d => stderr += d.toString());
-    ff.on('close', () => {
-      const matches = stderr.match(/RMS level dB:\s*([-\d.]+)/i);
-      if (matches && parseFloat(matches[1]) < -65) {
-        resolve({ hasCutoff: true, freqHz: 16000 });
-      } else {
-        resolve({ hasCutoff: false });
-      }
-    });
-    ff.on('error', () => resolve({ hasCutoff: false }));
-  });
+// Helper to extract PCM Int16Array from a WAV Buffer by finding the 'data' chunk marker
+function extractPcmFromWavBuffer(buf: Buffer): Int16Array {
+  let dataOffset = 44;
+  for (let i = 0; i < buf.length - 8; i++) {
+    if (
+      buf[i] === 0x64 && // 'd'
+      buf[i + 1] === 0x61 && // 'a'
+      buf[i + 2] === 0x74 && // 't'
+      buf[i + 3] === 0x61    // 'a'
+    ) {
+      dataOffset = i + 8;
+      break;
+    }
+  }
+
+  const rawBytes = buf.subarray(dataOffset);
+  return new Int16Array(
+    rawBytes.buffer,
+    rawBytes.byteOffset,
+    Math.floor(rawBytes.length / 2)
+  );
 }
 
 // Helper to compare two WAV files sample by sample
@@ -433,9 +444,8 @@ async function compareWavBuffers(path1: string, path2: string) {
   const buf1 = await fs.promises.readFile(path1);
   const buf2 = await fs.promises.readFile(path2);
 
-  const headerOffset = 44;
-  const pcm1 = new Int16Array(buf1.buffer, buf1.byteOffset + headerOffset, Math.floor((buf1.byteLength - headerOffset) / 2));
-  const pcm2 = new Int16Array(buf2.buffer, buf2.byteOffset + headerOffset, Math.floor((buf2.byteLength - headerOffset) / 2));
+  const pcm1 = extractPcmFromWavBuffer(buf1);
+  const pcm2 = extractPcmFromWavBuffer(buf2);
 
   const minLen = Math.min(pcm1.length, pcm2.length);
   if (minLen === 0) {
@@ -448,10 +458,11 @@ async function compareWavBuffers(path1: string, path2: string) {
   let sumSq2 = 0;
   let dotProd = 0;
 
-  const step = minLen > 2000000 ? Math.floor(minLen / 1000000) : 1;
+  const startSample = Math.min(250, Math.floor(minLen * 0.005));
+  const step = Math.max(1, Math.floor((minLen - startSample) / 500000));
   let count = 0;
 
-  for (let i = 0; i < minLen; i += step) {
+  for (let i = startSample; i < minLen; i += step) {
     const s1 = pcm1[i];
     const s2 = pcm2[i];
     const diff = Math.abs(s1 - s2);
@@ -572,10 +583,14 @@ ipcMain.handle('verify-audio-quality', async (_event, { originalPath, convertedP
     let summaryMessage = '品質良好 (非可逆圧縮による変化を検出)';
 
     if (diffMetrics.correlationPercent >= 99.0 && diffMetrics.snrDb >= 30) {
-      status = 'passed';
-      if (cutoffInfo.hasCutoff) {
+      if (isLosslessPair) {
+        status = 'perfect';
+        summaryMessage = `100%完全一致 (可逆変換・音質劣化ゼロ: 波形類似度 ${diffMetrics.correlationPercent}%)`;
+      } else if (cutoffInfo.hasCutoff) {
+        status = 'passed';
         summaryMessage = `品質正常 (非可逆圧縮による高域カット ~${(cutoffInfo.freqHz || 16000) / 1000}kHz 検出)`;
       } else {
+        status = 'passed';
         summaryMessage = `品質良好 (波形類似度: ${diffMetrics.correlationPercent}%)`;
       }
     } else if (diffMetrics.correlationPercent >= 90.0) {

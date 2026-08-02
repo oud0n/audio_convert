@@ -143,14 +143,16 @@ function writeString(view: DataView, offset: number, string: string) {
  * Estimates file size in Megabytes based on settings and duration.
  */
 export function estimateOutputSize(duration: number, settings: ConverterSettings): number {
-  if (settings.outputFormat === 'WAV') {
-    const bitDepth = parseInt(settings.bitDepth);
+  const fmt = (settings.outputFormat || 'WAV').toUpperCase();
+  if (['WAV', 'FLAC', 'ALAC'].includes(fmt)) {
+    const bitDepth = parseInt(settings.bitDepth) || 16;
     const byteRate = settings.sampleRate * settings.channels * (bitDepth / 8);
-    return (byteRate * duration) / (1024 * 1024);
+    // FLAC and ALAC achieve roughly ~50-60% compression ratio compared to raw uncompressed WAV
+    const compressionFactor = fmt === 'WAV' ? 1.0 : 0.55;
+    return ((byteRate * duration) / (1024 * 1024)) * compressionFactor;
   } else {
     // Lossy compressed format estimation (based on requested kbps bitrate)
-    const kbps = parseInt(settings.bitrate);
-    // kbps = kilobits per second. Divide by 8 to get kilobytes/sec
+    const kbps = parseInt(settings.bitrate) || 320;
     const bytesPerSec = (kbps * 1000) / 8;
     return (bytesPerSec * duration) / (1024 * 1024);
   }

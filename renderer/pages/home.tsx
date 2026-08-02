@@ -12,7 +12,7 @@ import {
   ShieldCheck
 } from '../components/Icons';
 import { estimateOutputSize } from '../utils/audioEncoder';
-import { MetadataTags } from '../types';
+import { MetadataTags, getFormatExtension } from '../types';
 import { t } from '../utils/i18n';
 
 export default function HomeDashboardPage() {
@@ -60,6 +60,7 @@ export default function HomeDashboardPage() {
   // UI Panels states
   const [bottomTab, setBottomTab] = useState<'source' | 'metadata' | 'quality' | 'log'>('source');
   const [showConfigModal, setShowConfigModal] = useState(false);
+  const [showPatternHelpModal, setShowPatternHelpModal] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [showDebugLogs, setShowDebugLogs] = useState(false);
 
@@ -858,11 +859,11 @@ export default function HomeDashboardPage() {
                               
                               pat = pat.replace('{year}', file.tags.year || '2026');
                               pat = pat.replace('{genre}', file.tags.genre || 'Electronic');
-                              return `${pat}.${file.outputFormat ? file.outputFormat.toLowerCase() : settings.outputFormat.toLowerCase()}`;
+                              return `${pat}.${getFormatExtension(file.outputFormat || settings.outputFormat)}`;
                             }
                             const dot = file.name.lastIndexOf('.');
                             const base = dot !== -1 ? file.name.substring(0, dot) : file.name;
-                            return `${base}.${file.outputFormat ? file.outputFormat.toLowerCase() : settings.outputFormat.toLowerCase()}`;
+                            return `${base}.${getFormatExtension(file.outputFormat || settings.outputFormat)}`;
                           })()}
                         </td>
                         
@@ -873,7 +874,7 @@ export default function HomeDashboardPage() {
                         
                         {/* Format */}
                         <td className="py-2 px-3 text-zinc-300">
-                          <span className="text-zinc-500">{file.originalFormat.toUpperCase()}</span> → <span className="text-emerald-500 font-bold">{file.outputFormat}</span>
+                          <span className="text-zinc-300 font-semibold">{file.originalFormat.toUpperCase()}</span> → <span className="text-emerald-500 font-bold">{file.outputFormat}</span>
                         </td>
 
                         {/* Duration */}
@@ -936,7 +937,7 @@ export default function HomeDashboardPage() {
                                     setBottomTab('quality');
                                   }}
                                   className={`px-1.5 py-0.5 rounded-md text-[9px] font-bold border transition-colors cursor-pointer ${
-                                    file.verificationResult.exactMatch
+                                    file.verificationResult.exactMatch || file.verificationResult.status === 'perfect'
                                       ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
                                       : file.verificationResult.status === 'passed'
                                       ? 'bg-blue-500/20 text-blue-300 border-blue-500/40 hover:bg-blue-500/30'
@@ -946,7 +947,7 @@ export default function HomeDashboardPage() {
                                   }`}
                                   title="品質検証レポートを表示"
                                 >
-                                  {file.verificationResult.exactMatch
+                                  {file.verificationResult.exactMatch || file.verificationResult.status === 'perfect'
                                     ? '✨100%完全一致'
                                     : file.verificationResult.status === 'passed'
                                     ? '🟢品質正常'
@@ -1109,31 +1110,40 @@ export default function HomeDashboardPage() {
                     </label>
                   </div>
                   <div className="pt-1.5 border-t border-zinc-900">
-                    <label className="flex items-center gap-2 text-zinc-400 cursor-pointer mb-1.5 hover:text-zinc-250">
-                      <input
-                        type="checkbox"
-                        checked={settings.renameByTags}
-                        onChange={(e) => updateSetting('renameByTags', e.target.checked)}
-                        className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500 cursor-pointer"
-                      />
-                      <span>{t(lang, 'fileNamePattern')}</span>
-                    </label>
-                    {settings.renameByTags && (
-                      <div className="flex gap-1">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="flex items-center gap-2 text-zinc-400 cursor-pointer hover:text-zinc-250">
                         <input
-                          type="text"
-                          value={settings.renamePattern}
-                          onChange={(e) => updateSetting('renamePattern', e.target.value)}
-                          className="flex-1 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300 font-mono text-[11px] focus:outline-none focus:border-emerald-500"
+                          type="checkbox"
+                          checked={settings.renameByTags}
+                          onChange={(e) => updateSetting('renameByTags', e.target.checked)}
+                          className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500 cursor-pointer"
                         />
-                        <button 
-                          onClick={() => alert(t(lang, 'macHelp'))}
-                          className="px-2 bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 rounded text-zinc-400 text-[10px] cursor-pointer"
-                        >
-                          {t(lang, 'macHelpBtn')}
-                        </button>
-                      </div>
-                    )}
+                        <span className="font-semibold">{t(lang, 'fileNamePattern')}</span>
+                      </label>
+                      <button 
+                        onClick={() => setShowPatternHelpModal(true)}
+                        className="px-2 bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 rounded text-zinc-400 text-[10px] cursor-pointer"
+                      >
+                        {t(lang, 'macHelpBtn')}
+                      </button>
+                    </div>
+                    <div className="flex gap-1">
+                      <input
+                        type="text"
+                        value={settings.renamePattern || ''}
+                        onChange={(e) => {
+                          setSettings((prev) => ({
+                            ...prev,
+                            renamePattern: e.target.value,
+                            renameByTags: true,
+                          }));
+                        }}
+                        placeholder="{artist} - {title}"
+                        className={`flex-1 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300 font-mono text-[11px] focus:outline-none focus:border-emerald-500 ${
+                          !settings.renameByTags ? 'opacity-60' : ''
+                        }`}
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -1245,28 +1255,19 @@ export default function HomeDashboardPage() {
                   
                   <div className="grid grid-cols-3 gap-x-2 gap-y-1.5 bg-zinc-900/20 p-2.5 rounded-lg border border-zinc-900/60 max-h-[170px] overflow-y-auto">
                     {allFormats.map((fmt) => {
-                      const isSupported = ['WAV', 'MP3', 'FLAC', 'M4A', 'Ogg'].includes(fmt);
                       const displayFmt = fmt === 'Ogg' ? 'OGG' : fmt;
-                      const isSelected = settings.outputFormat === displayFmt;
+                      const isSelected = settings.outputFormat.toUpperCase() === displayFmt.toUpperCase();
                       return (
                         <label 
                           key={fmt} 
                           className={`flex items-center gap-2 cursor-pointer transition-colors ${
                             isSelected 
                               ? 'text-emerald-400 font-bold' 
-                              : isSupported 
-                              ? 'text-zinc-300 hover:text-zinc-100' 
-                              : 'text-zinc-650 opacity-40 hover:text-zinc-400'
+                              : 'text-zinc-300 hover:text-zinc-100'
                           }`}
                           onClick={() => {
-                            if (isSupported) {
-                              updateSetting('outputFormat', displayFmt as any);
-                              addLog(`Output format updated to ${displayFmt}.`);
-                            } else {
-                              // Fallback simulation notice
-                              updateSetting('outputFormat', displayFmt as any);
-                              addLog(`[Simulation] selected unsupported output format: ${fmt}. Output codec will fallback to high-fidelity container.`);
-                            }
+                            updateSetting('outputFormat', displayFmt as any);
+                            addLog(`Output format updated to ${displayFmt}.`);
                           }}
                         >
                           <input
@@ -1489,8 +1490,8 @@ export default function HomeDashboardPage() {
                   {settings.outputFormat}
                 </span>
                 <span className="text-zinc-500 font-mono text-[10px]">
-                  {settings.outputFormat === 'WAV' || settings.outputFormat === 'FLAC'
-                    ? `${settings.bitDepth}-bit PCM`
+                  {['WAV', 'FLAC', 'ALAC'].includes((settings.outputFormat || '').toUpperCase())
+                    ? (settings.sameAsSource ? 'Lossless (Same as Source)' : `${settings.bitDepth}-bit Lossless`)
                     : `${settings.bitrate} kbps`
                   }
                 </span>
@@ -1499,11 +1500,11 @@ export default function HomeDashboardPage() {
                 <Volume2 className="h-4 w-4 text-zinc-500" />
                 <span className="text-zinc-400">{t(lang, 'normalizationLevel')}</span>
                 <span className={`px-1.5 py-0.5 border rounded text-[10px] font-mono font-bold ${
-                  settings.normalize 
+                  settings.normalize && !settings.sameAsSource
                     ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' 
                     : 'bg-zinc-950 border-zinc-800 text-zinc-500'
                 }`}>
-                  {settings.normalize ? `ACTIVE (${settings.normalizationTargetDb} dB)` : 'BYPASS'}
+                  {settings.normalize && !settings.sameAsSource ? `ACTIVE (${settings.normalizationTargetDb} dB)` : 'BYPASS'}
                 </span>
               </div>
             </div>
@@ -1813,6 +1814,97 @@ export default function HomeDashboardPage() {
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded cursor-pointer transition-colors"
                 >
                   {lang === 'ja' ? '設定を適用して閉じる' : 'Apply and Close'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ======================================================== */}
+        {/* PATTERN HELP MODAL */}
+        {/* ======================================================== */}
+        {showPatternHelpModal && (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in select-none text-xs">
+            <div className="bg-zinc-900 border border-zinc-800 w-full max-w-lg rounded-xl p-5 shadow-2xl space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+                <div className="flex items-center gap-2">
+                  <Info className="h-4.5 w-4.5 text-emerald-400" />
+                  <span className="font-bold text-white text-sm">
+                    {lang === 'ja' ? 'ファイル名パターン ヘルプ & マクロタグ' : 'Filename Pattern Help & Macro Tags'}
+                  </span>
+                </div>
+                <button 
+                  onClick={() => setShowPatternHelpModal(false)}
+                  className="text-zinc-500 hover:text-zinc-300 cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-zinc-400 text-[11px] leading-relaxed">
+                  {lang === 'ja'
+                    ? '以下のマクロタグをクリックすると、ファイル名パターンに自動挿入されます。'
+                    : 'Click any macro tag below to insert it into the filename pattern.'
+                  }
+                </p>
+
+                <div className="grid grid-cols-2 gap-2 max-h-[220px] overflow-y-auto pr-1">
+                  {[
+                    { tag: '{title}', descJa: 'タイトル (Title)', descEn: 'Track Title', example: 'Song Title' },
+                    { tag: '{artist}', descJa: 'アーティスト名 (Artist)', descEn: 'Artist Name', example: 'Artist Name' },
+                    { tag: '{album}', descJa: 'アルバム名 (Album)', descEn: 'Album Name', example: 'Album Title' },
+                    { tag: '{albumArtist}', descJa: 'アルバムアーティスト名', descEn: 'Album Artist', example: 'Various Artists' },
+                    { tag: '{track}', descJa: 'トラック番号 (Track)', descEn: 'Track Number', example: '01' },
+                    { tag: '{disc}', descJa: 'ディスク番号 (Disc)', descEn: 'Disc Number', example: '1' },
+                    { tag: '{year}', descJa: 'リリース年 (Year)', descEn: 'Release Year', example: '2026' },
+                    { tag: '{genre}', descJa: 'ジャンル (Genre)', descEn: 'Music Genre', example: 'Pop / Rock' },
+                  ].map((item) => (
+                    <button
+                      key={item.tag}
+                      onClick={() => {
+                        const current = settings.renamePattern || '';
+                        const updated = current ? `${current} - ${item.tag}` : item.tag;
+                        setSettings((prev) => ({
+                          ...prev,
+                          renamePattern: updated,
+                          renameByTags: true,
+                        }));
+                      }}
+                      className="flex flex-col items-start p-2 bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 rounded transition-all cursor-pointer text-left group"
+                    >
+                      <span className="font-mono text-emerald-400 font-bold group-hover:text-emerald-300">{item.tag}</span>
+                      <span className="text-[10px] text-zinc-400 mt-0.5">{lang === 'ja' ? item.descJa : item.descEn}</span>
+                      <span className="text-[9px] font-mono text-zinc-600">例: {item.example}</span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="p-2.5 bg-zinc-950 border border-zinc-800/80 rounded space-y-1 font-mono text-[10px]">
+                  <span className="text-zinc-500 uppercase block">{lang === 'ja' ? '現在のパターンプレビュー:' : 'CURRENT PATTERN PREVIEW:'}</span>
+                  <div className="text-emerald-400 font-semibold truncate">
+                    {(() => {
+                      let pat = settings.renamePattern || '{artist} - {title}';
+                      pat = pat.replace('{artist}', 'Beatsmith');
+                      pat = pat.replace('{title}', 'Track_01');
+                      pat = pat.replace('{album}', 'Demo Album');
+                      pat = pat.replace('{albumArtist}', 'Beatsmith');
+                      pat = pat.replace('{disc}', '1');
+                      pat = pat.replace('{track}', '01');
+                      pat = pat.replace('{year}', '2026');
+                      pat = pat.replace('{genre}', 'Electronic');
+                      return `${pat}.${getFormatExtension(settings.outputFormat)}`;
+                    })()}
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-zinc-800 flex justify-end">
+                <button
+                  onClick={() => setShowPatternHelpModal(false)}
+                  className="px-5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded cursor-pointer transition-colors"
+                >
+                  {lang === 'ja' ? '閉じる' : 'Close'}
                 </button>
               </div>
             </div>

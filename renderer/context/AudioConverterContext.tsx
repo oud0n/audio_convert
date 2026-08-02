@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
-import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry } from '../types';
+import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
 import { bufferToWav, analyzeAudioBuffer } from '../utils/audioEncoder';
 
 interface AudioConverterContextType {
@@ -40,12 +40,12 @@ interface AudioConverterContextType {
 const AudioConverterContext = createContext<AudioConverterContextType | undefined>(undefined);
 
 const defaultSettings: ConverterSettings = {
-  outputFormat: 'WAV',
+  outputFormat: 'ALAC',
   bitrate: '320',
   sampleRate: 44100,
   bitDepth: '16',
   channels: 2,
-  normalize: true,
+  normalize: false,
   normalizationTargetDb: -1.0,
   autoNotification: true,
   notificationSound: 'chime',
@@ -56,12 +56,12 @@ const defaultSettings: ConverterSettings = {
   ffmpegHighSpeed: true,
   autoRemoveCompleted: false,
   autoVerifyQuality: true,
-  sameAsSource: false,
+  sameAsSource: true,
   electronDesktopMode: true,
-  deleteOriginalAfterConvert: false,
+  deleteOriginalAfterConvert: true,
   saveInSourceFolder: true,
   renameByTags: true,
-  renamePattern: '{artist} - {title}',
+  renamePattern: '{disc} - {track} - {title}',
   localSavePath: '~/Music/Audio-Convert-Outputs',
 };
 
@@ -230,7 +230,19 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       const nextTabs = prev.map(t => {
         if (t.id === activeTabId) {
           const nextSettings = typeof update === 'function' ? update(t.settings) : update;
-          return { ...t, settings: nextSettings };
+          const updatedFiles = t.files.map(f => {
+            if (f.status === 'queued' || f.status === 'failed') {
+              return {
+                ...f,
+                outputFormat: nextSettings.outputFormat,
+                bitrate: nextSettings.bitrate,
+                sampleRate: nextSettings.sampleRate,
+                channels: nextSettings.channels,
+              };
+            }
+            return f;
+          });
+          return { ...t, settings: nextSettings, files: updatedFiles };
         }
         return t;
       });
@@ -410,38 +422,76 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               };
 
               const filePath = resolveFilePath(f);
-
               const info = analyzeAudioBuffer(buffer);
-              const fileRecord: AudioFile = {
-                id,
-                name: f.name,
-                path: filePath,
-                size: f.size,
-                duration: Math.round(buffer.duration * 10) / 10,
-                originalFormat: ext,
-                outputFormat: settings.outputFormat,
-                bitrate: settings.bitrate,
-                sampleRate: settings.sampleRate,
-                channels: settings.channels,
-                status: 'queued',
-                progress: 0,
-                normalizationApplied: false,
-                originalAudioBuffer: buffer,
-                peakDb: info.peakDb,
-                rmsDb: info.rmsDb,
-                tags: {
-                  title: f.name.substring(0, f.name.lastIndexOf('.')) || f.name,
-                  artist: 'Unknown Artist',
-                  album: 'Converted Album',
-                  albumArtist: 'Unknown Artist',
-                  disc: '1',
-                  year: new Date().getFullYear().toString(),
-                  genre: 'Acoustic / Vocal',
-                  track: '01',
-                  comment: 'Rendered via Audio Convert',
-                },
+
+              let initialTags = {
+                title: f.name.substring(0, f.name.lastIndexOf('.')) || f.name,
+                artist: 'Unknown Artist',
+                album: 'Converted Album',
+                albumArtist: 'Unknown Artist',
+                disc: '1',
+                year: new Date().getFullYear().toString(),
+                genre: 'Acoustic / Vocal',
+                track: '01',
+                comment: 'Rendered via Audio Convert',
               };
-              resolve({ success: true, fileRecord });
+
+              const createAndResolve = (finalTags: typeof initialTags, metaFormat?: any) => {
+                const nativeSampleRate = metaFormat?.sampleRate || buffer.sampleRate;
+                const nativeChannels = metaFormat?.numberOfChannels || buffer.numberOfChannels;
+                const nativeBitrate = metaFormat?.bitrate ? `${Math.round(metaFormat.bitrate / 1000)}k` : `${settings.bitrate}k`;
+                const nativeDuration = metaFormat?.duration ? Math.round(metaFormat.duration * 10) / 10 : Math.round(buffer.duration * 10) / 10;
+
+                const fileRecord: AudioFile = {
+                  id,
+                  name: f.name,
+                  path: filePath,
+                  size: f.size,
+                  duration: nativeDuration,
+                  originalFormat: ext,
+                  outputFormat: settings.outputFormat,
+                  bitrate: nativeBitrate,
+                  sampleRate: nativeSampleRate,
+                  channels: nativeChannels,
+                  status: 'queued',
+                  progress: 0,
+                  normalizationApplied: false,
+                  originalAudioBuffer: buffer,
+                  peakDb: info.peakDb,
+                  rmsDb: info.rmsDb,
+                  tags: finalTags,
+                };
+                resolve({ success: true, fileRecord });
+              };
+
+              if (filePath && typeof window !== 'undefined' && window.ipc) {
+                window.ipc.invoke<{ success: boolean; format?: any; tags?: any }>('read-audio-metadata', filePath)
+                  .then((metaResult) => {
+                    let metaFormat: any = undefined;
+                    if (metaResult && metaResult.success) {
+                      if (metaResult.tags) {
+                        initialTags = {
+                          title: metaResult.tags.title || initialTags.title,
+                          artist: metaResult.tags.artist || initialTags.artist,
+                          album: metaResult.tags.album || initialTags.album,
+                          albumArtist: metaResult.tags.albumArtist || initialTags.albumArtist,
+                          disc: metaResult.tags.disc || initialTags.disc,
+                          year: metaResult.tags.year || initialTags.year,
+                          genre: metaResult.tags.genre || initialTags.genre,
+                          track: metaResult.tags.track || initialTags.track,
+                          comment: 'Native Audio Convert',
+                        };
+                      }
+                      if (metaResult.format) {
+                        metaFormat = metaResult.format;
+                      }
+                    }
+                    createAndResolve(initialTags, metaFormat);
+                  })
+                  .catch(() => createAndResolve(initialTags));
+              } else {
+                createAndResolve(initialTags);
+              }
             },
             (err) => {
               addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコード失敗: ${err?.message || '不明なデコードエラー'}。フォールバック処理を起動します。`, 'error');
@@ -489,9 +539,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                         comment: 'Rendered via Audio Convert',
                       };
 
+                      let metaResultObj: any = null;
                       try {
                         addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPC「read-audio-metadata」を呼び出し中...`, 'info');
-                        const metaResult = await window.ipc.invoke('read-audio-metadata', filePath);
+                        const metaResult = await window.ipc.invoke<{ success: boolean; format?: any; tags?: any; error?: string }>('read-audio-metadata', filePath);
+                        metaResultObj = metaResult;
                         if (metaResult && metaResult.success) {
                           addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ解析成功: タイトル="${metaResult.tags.title}", アーティスト="${metaResult.tags.artist}"`, 'success');
                           metadataTags = {
@@ -520,17 +572,22 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                         (decodedWavBuffer) => {
                           addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 全デコードが正常完了しました!`, 'success');
                           const info = analyzeAudioBuffer(decodedWavBuffer);
+                          const nativeSampleRate = metaResultObj?.format?.sampleRate || decodedWavBuffer.sampleRate;
+                          const nativeChannels = metaResultObj?.format?.numberOfChannels || decodedWavBuffer.numberOfChannels;
+                          const nativeBitrate = metaResultObj?.format?.bitrate ? `${Math.round(metaResultObj.format.bitrate / 1000)}k` : `${settings.bitrate}k`;
+                          const nativeDuration = metaResultObj?.format?.duration ? Math.round(metaResultObj.format.duration * 10) / 10 : Math.round(decodedWavBuffer.duration * 10) / 10;
+
                           const fileRecord: AudioFile = {
                             id,
                             name: f.name,
                             path: filePath,
                             size: f.size,
-                            duration: Math.round(decodedWavBuffer.duration * 10) / 10,
+                            duration: nativeDuration,
                             originalFormat: ext,
                             outputFormat: settings.outputFormat,
-                            bitrate: settings.bitrate,
-                            sampleRate: settings.sampleRate,
-                            channels: settings.channels,
+                            bitrate: nativeBitrate,
+                            sampleRate: nativeSampleRate,
+                            channels: nativeChannels,
                             status: 'queued',
                             progress: 0,
                             normalizationApplied: false,
@@ -714,7 +771,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       const targetDb = tabSettings.normalizationTargetDb;
 
       let gainMult = 1.0;
-      if (tabSettings.normalize && originalPeaks.peakDb > -120) {
+      if (!tabSettings.sameAsSource && tabSettings.normalize && originalPeaks.peakDb > -120) {
         const peakAmp = Math.pow(10, originalPeaks.peakDb / 20);
         const targetAmp = Math.pow(10, targetDb / 20);
         gainMult = targetAmp / peakAmp;
@@ -759,13 +816,16 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         
         pattern = pattern.replace('{year}', fileRecord.tags.year || '2026');
         pattern = pattern.replace('{genre}', fileRecord.tags.genre || 'Electronic');
-        finalExportName = `${pattern}.${fileRecord.outputFormat.toLowerCase()}`;
+        const targetExt = getFormatExtension(fileRecord.outputFormat);
+        finalExportName = `${pattern}.${targetExt}`;
       } else {
         const lastDot = fileRecord.name.lastIndexOf('.');
         const baseName = lastDot !== -1 ? fileRecord.name.substring(0, lastDot) : fileRecord.name;
-        finalExportName = `${baseName}.${fileRecord.outputFormat.toLowerCase()}`;
+        const targetExt = getFormatExtension(fileRecord.outputFormat);
+        finalExportName = `${baseName}.${targetExt}`;
       }
 
+      let verificationResult: any = undefined;
       // 1. Save to local disk via IPC
       if (typeof window !== 'undefined' && window.ipc) {
         addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ファイルをディスクに書き込み中...` : `[${fileRecord.name}] Writing file to disk...`, 'info');
@@ -780,24 +840,15 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           tags: fileRecord.tags,
         });
 
-        if (saveResult && saveResult.success) {
-          addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ディスク保存完了: "${saveResult.path}"` : `[${fileRecord.name}] Saved successfully to: "${saveResult.path}"`, 'success');
+        let savedPath = '';
+        if (saveResult && saveResult.success && saveResult.path) {
+          savedPath = saveResult.path;
+          addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ディスク保存完了: "${savedPath}"` : `[${fileRecord.name}] Saved successfully to: "${savedPath}"`, 'success');
         } else {
           throw new Error(saveResult?.error || 'Failed to save file');
         }
-      }
 
-      // 2. Perform Quality Verification if enabled
-      let verificationResult: any = undefined;
-      let savedPath = '';
-      if (typeof window !== 'undefined' && window.ipc) {
-        let targetDir = tabSettings.localSavePath;
-        if (tabSettings.saveInSourceFolder && fileRecord.path) {
-          targetDir = fileRecord.path.substring(0, Math.max(fileRecord.path.lastIndexOf('/'), fileRecord.path.lastIndexOf('\\')));
-        }
-        savedPath = `${targetDir}/${finalExportName}`;
-
-        if (tabSettings.autoVerifyQuality && fileRecord.path) {
+        if (tabSettings.autoVerifyQuality && fileRecord.path && savedPath) {
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] データ欠損・品質劣化チェックを実行中...` : `[${fileRecord.name}] Verifying quality and data loss...`, 'info');
           const isLosslessPair = ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.originalFormat.toUpperCase()) &&
                                 ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.outputFormat.toUpperCase());
@@ -840,12 +891,12 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             ...t,
             files: t.files.map(f => f.id === id ? {
               ...f,
-              name: finalExportName,
+              outputFileName: finalExportName,
               status: 'completed',
               progress: 100,
               convertedAudioUrl: convertedUrl,
               convertedBlob: wavBlob,
-              normalizationApplied: tabSettings.normalize,
+              normalizationApplied: !tabSettings.sameAsSource && tabSettings.normalize,
               gainMultiplier: gainMult,
               originalDeleted: originalDeleted,
               verificationResult: verificationResult,
@@ -993,6 +1044,10 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             verificationResult: undefined,
             convertedAudioUrl: null,
             convertedBlob: null,
+            outputFormat: t.settings.outputFormat,
+            bitrate: t.settings.bitrate,
+            sampleRate: t.settings.sampleRate,
+            channels: t.settings.channels,
           }))
         };
       }
