@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
-import { bufferToWav, analyzeAudioBuffer } from '../utils/audioEncoder';
+import { analyzeAudioBuffer } from '../utils/audioEncoder';
 
 interface AudioConverterContextType {
   files: AudioFile[];
@@ -99,6 +99,21 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const conversionQueueRef = useRef<string[]>([]);
   const activeConversionIdRef = useRef<string | null>(null);
   const activeConversionTabIdRef = useRef<string | null>(null);
+  const jobRef = useRef<{ id: string; cancelled: boolean } | null>(null);
+  const batchRef = useRef({ success: 0, failed: 0, warnings: 0 });
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  useEffect(() => {
+    if (!window.ipc) return;
+    return window.ipc.on<{ jobId: string; phase: 'normalizing' | 'converting'; progress: number }>('conversion-progress', event => {
+      if (event.jobId !== jobRef.current?.id || jobRef.current.cancelled) return;
+      const tabId = activeConversionTabIdRef.current;
+      const fileId = activeConversionIdRef.current;
+      if (tabId && fileId) setTabs(prev => prev.map(tab => tab.id === tabId ? {
+        ...tab, files: tab.files.map(file => file.id === fileId ? { ...file, status: event.phase, progress: event.progress } : file)
+      } : tab));
+    });
+  }, []);
   const defaultSavePathRef = useRef<string>('~/Music/Audio-Convert-Outputs');
 
   // Initialize tabs by loading settings.json or falling back to default tab1 (FLAC)
@@ -290,6 +305,10 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   };
 
   const handleRemoveTab = (id: string) => {
+    if (id === activeConversionTabIdRef.current) {
+      showToast('info', lang === 'ja' ? '処理完了または停止後にタブを削除してください。' : 'Wait for conversion to finish or stop before removing this tab.');
+      return;
+    }
     if (tabs.length <= 1) {
       showToast('error', lang === 'ja' ? '最後のタブを閉じることはできません。' : 'Cannot close the last remaining tab.');
       return;
@@ -691,6 +710,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
 
 
   const handleStartConversion = () => {
+    if (activeConversionTabIdRef.current) return;
     const targetTabId = activeTabId;
     const currentTab = tabs.find(t => t.id === targetTabId);
     if (!currentTab) return;
@@ -702,6 +722,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     }
 
     setIsConverting(true);
+    batchRef.current = { success: 0, failed: 0, warnings: 0 };
     activeConversionTabIdRef.current = targetTabId;
     conversionQueueRef.current = queued.map((f) => f.id);
     
@@ -721,17 +742,19 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       activeConversionIdRef.current = null;
       activeConversionTabIdRef.current = null;
       
-      addLogToTab(targetTabId, lang === 'ja' ? 'バッチ変換処理が正常に完了しました。' : 'Batch conversion pipeline completed successfully.', 'success');
-      showToast('success', lang === 'ja' ? 'バッチ変換処理が完了しました！' : 'Batch conversion pipeline completed!');
+      const { success, failed, warnings } = batchRef.current;
+      const message = lang === 'ja' ? `バッチ完了: 成功 ${success}件、失敗 ${failed}件、要確認 ${warnings}件` : `Batch finished: ${success} succeeded, ${failed} failed, ${warnings} need review`;
+      addLogToTab(targetTabId, message, failed || warnings ? 'error' : 'success');
+      showToast(failed ? 'error' : warnings ? 'info' : 'success', message);
       
-      const tabSettings = tabs.find(t => t.id === targetTabId)?.settings || defaultSettings;
+      const tabSettings = tabsRef.current.find(t => t.id === targetTabId)?.settings || defaultSettings;
       if (tabSettings.autoNotification) {
         playNotificationSound(tabSettings.notificationSound);
       }
 
       if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
         new Notification('Audio Convert', {
-          body: lang === 'ja' ? 'すべてのファイルの変換と正規化が完了しました。' : 'All files converted and peak-normalized successfully!',
+          body: message,
         });
       }
 
@@ -750,49 +773,44 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   };
 
   const runConversionWorkflow = async (tabId: string, id: string) => {
-    const tab = tabs.find(t => t.id === tabId);
+    const tab = tabsRef.current.find(t => t.id === tabId);
     const fileRecord = tab?.files.find((f) => f.id === id);
     
     if (!tab || !fileRecord || !fileRecord.originalAudioBuffer) {
+      batchRef.current.failed++;
       updateFileStatus(tabId, id, 'failed', 0, 'Audio source missing or unreadable');
       processNextInQueue();
       return;
     }
 
     const tabSettings = tab.settings;
+    const job = { id: crypto.randomUUID(), cancelled: false };
+    jobRef.current = job;
+    const checkActive = () => {
+      if (job.cancelled) throw new Error(lang === 'ja' ? '処理を中断しました。' : 'Conversion cancelled.');
+    };
 
     try {
-      addLogToTab(tabId, `[${fileRecord.name}] Step 1: Normalizing amplitude...`, 'info');
-      updateFileStatus(tabId, id, 'normalizing', 15);
-      await delay(600);
+      await window.ipc.invoke('start-conversion-job', job.id);
+      checkActive();
 
       const buffer = fileRecord.originalAudioBuffer;
       const originalPeaks = analyzeAudioBuffer(buffer);
       const targetDb = tabSettings.normalizationTargetDb;
 
-      let gainMult = 1.0;
+      let gainMult = tabSettings.sameAsSource ? 1.0 : Math.pow(10, tabSettings.volumeBoostDb / 20);
       if (!tabSettings.sameAsSource && tabSettings.normalize && originalPeaks.peakDb > -120) {
         const peakAmp = Math.pow(10, originalPeaks.peakDb / 20);
         const targetAmp = Math.pow(10, targetDb / 20);
         gainMult = targetAmp / peakAmp;
       }
 
-      addLogToTab(tabId, `[${fileRecord.name}] Step 2: Transcoding buffer to WAV (resampling: ${tabSettings.sampleRate}Hz, bit depth: ${tabSettings.bitDepth}-bit)...`, 'info');
-      updateFileStatus(tabId, id, 'converting', 40);
-      await delay(400);
+      addLogToTab(tabId, `[${fileRecord.name}] Step 2: Converting with FFmpeg (resampling: ${tabSettings.sampleRate}Hz, bit depth: ${tabSettings.bitDepth}-bit)...`, 'info');
+      updateFileStatus(tabId, id, 'converting', 0);
 
-      const outputSettings = {
-        ...tabSettings,
-        outputFormat: fileRecord.outputFormat as any,
-      };
-
-      const outBuffer = bufferToWav(buffer, outputSettings, (progress) => {
-        const overallProg = Math.round(40 + (progress / 100) * 55);
-        updateFileStatus(tabId, id, 'converting', overallProg);
-      });
-
-      const wavBlob = new Blob([outBuffer], { type: 'audio/wav' });
-      const convertedUrl = typeof window !== 'undefined' ? URL.createObjectURL(wavBlob) : null;
+      let convertedUrl: string | null = null;
+      let wavBlob: Blob | null = null;
+      let savedOutputPath = '';
 
       let finalExportName = fileRecord.name;
       if (tabSettings.renameByTags && fileRecord.tags) {
@@ -829,62 +847,86 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       // 1. Save to local disk via IPC
       if (typeof window !== 'undefined' && window.ipc) {
         addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ファイルをディスクに書き込み中...` : `[${fileRecord.name}] Writing file to disk...`, 'info');
-        const saveResult = await window.ipc.invoke<{ success: boolean; path?: string; error?: string }>('save-converted-file', {
-          fileBuffer: outBuffer,
-          savePath: tabSettings.localSavePath,
-          saveInSourceFolder: tabSettings.saveInSourceFolder,
+        const saveResult = await window.ipc.invoke<{ success: boolean; path?: string; fileName?: string; error?: string }>('save-converted-file', {
+          jobId: job.id,
+          settings: tabSettings,
           inputFilePath: fileRecord.path,
           fileName: finalExportName,
           outputFormat: fileRecord.outputFormat,
-          bitrate: tabSettings.bitrate,
           tags: fileRecord.tags,
         });
 
+        if (saveResult?.success && saveResult.path) {
+          setTabs(prev => prev.map(tab => tab.id === tabId ? { ...tab, files: tab.files.map(file => file.id === id ? { ...file, outputPath: saveResult.path, outputFileName: saveResult.fileName } : file) } : tab));
+        }
+        checkActive();
         let savedPath = '';
         if (saveResult && saveResult.success && saveResult.path) {
           savedPath = saveResult.path;
+          savedOutputPath = savedPath;
+          finalExportName = saveResult.fileName || finalExportName;
+          try {
+            const preview = await window.ipc.invoke<Uint8Array>('read-output-preview', savedPath, job.id);
+            checkActive();
+            wavBlob = new Blob([new Uint8Array(preview).buffer], { type: 'audio/wav' });
+            convertedUrl = URL.createObjectURL(wavBlob);
+          } catch (previewError) {
+            addLogToTab(tabId, `Output saved; preview unavailable: ${String(previewError)}`, 'info');
+          }
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ディスク保存完了: "${savedPath}"` : `[${fileRecord.name}] Saved successfully to: "${savedPath}"`, 'success');
         } else {
           throw new Error(saveResult?.error || 'Failed to save file');
         }
 
         if (tabSettings.autoVerifyQuality && fileRecord.path && savedPath) {
+          checkActive();
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] データ欠損・品質劣化チェックを実行中...` : `[${fileRecord.name}] Verifying quality and data loss...`, 'info');
           const isLosslessPair = ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.originalFormat.toUpperCase()) &&
                                 ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.outputFormat.toUpperCase());
           try {
             const vRes = await window.ipc.invoke<{ success: boolean; result?: any; error?: string }>('verify-audio-quality', {
+              jobId: job.id,
               originalPath: fileRecord.path,
               convertedPath: savedPath,
               isLosslessPair,
             });
 
+            checkActive();
             if (vRes && vRes.success && vRes.result) {
               verificationResult = vRes.result;
               const logMsg = lang === 'ja'
                 ? `[${fileRecord.name}] 品質検証完了: ${vRes.result.summaryMessage}`
                 : `[${fileRecord.name}] Quality audit completed: ${vRes.result.summaryMessage}`;
               addLogToTab(tabId, logMsg, vRes.result.status === 'perfect' || vRes.result.status === 'passed' ? 'success' : 'error');
+            } else {
+              addLogToTab(tabId, `Quality verification failed: ${vRes?.error || 'No result'}`, 'error');
             }
           } catch (vErr: any) {
-            console.warn('Auto quality verification error:', vErr);
+            addLogToTab(tabId, `Quality verification failed: ${vErr.message}`, 'error');
           }
         }
       }
 
+      if (!savedOutputPath) throw new Error('No output file was saved');
+      checkActive();
+
       // 3. Trash original file if deleteOriginalAfterConvert is active
       let originalDeleted = false;
-      if (tabSettings.deleteOriginalAfterConvert && fileRecord.path && typeof window !== 'undefined' && window.ipc) {
+      if (tabSettings.deleteOriginalAfterConvert && savedOutputPath !== fileRecord.path && (!tabSettings.autoVerifyQuality || verificationResult?.status === 'perfect' || verificationResult?.status === 'passed') && fileRecord.path && typeof window !== 'undefined' && window.ipc) {
         addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動中...` : `[${fileRecord.name}] Moving original file to trash...`, 'info');
-        const trashResult = await window.ipc.invoke<{ success: boolean; error?: string }>('trash-file', fileRecord.path);
+        const trashResult = await window.ipc.invoke<{ success: boolean; error?: string }>('trash-file', fileRecord.path, job.id);
         if (trashResult && trashResult.success) {
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動しました。` : `[${fileRecord.name}] Moved original file to trash.`, 'success');
           originalDeleted = true;
         } else {
+          batchRef.current.warnings++;
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルのゴミ箱への移動に失敗しました: ${trashResult.error}` : `[${fileRecord.name}] Failed to move original file to trash: ${trashResult.error}`, 'error');
         }
       }
 
+      checkActive();
+      batchRef.current.success++;
+      if (tabSettings.autoVerifyQuality && (!verificationResult || !['perfect', 'passed'].includes(verificationResult.status))) batchRef.current.warnings++;
       setTabs(prev => prev.map(t => {
         if (t.id === tabId) {
           return {
@@ -892,6 +934,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             files: t.files.map(f => f.id === id ? {
               ...f,
               outputFileName: finalExportName,
+              outputPath: savedOutputPath,
               status: 'completed',
               progress: 100,
               convertedAudioUrl: convertedUrl,
@@ -908,14 +951,21 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
 
       addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換に成功しました。` : `[${fileRecord.name}] Conversion finished successfully.`, 'success');
 
-      await delay(300);
-      processNextInQueue();
-
     } catch (err: any) {
-      console.error(err);
+      if (!job.cancelled) batchRef.current.failed++;
       addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換失敗: ${err.message}` : `[${fileRecord.name}] Conversion failed: ${err.message}`, 'error');
       updateFileStatus(tabId, id, 'failed', 0, err.message || 'Pipeline buffer overflow');
-      processNextInQueue();
+    } finally {
+      await window.ipc.invoke('finish-conversion-job', job.id).catch(() => {});
+      jobRef.current = null;
+      if (job.cancelled) {
+        const message = lang === 'ja' ? `バッチ中断: 成功 ${batchRef.current.success}件、失敗 ${batchRef.current.failed}件` : `Batch cancelled: ${batchRef.current.success} succeeded, ${batchRef.current.failed} failed`;
+        addLogToTab(tabId, message, 'info');
+        showToast('info', message);
+        setIsConverting(false);
+        activeConversionIdRef.current = null;
+        activeConversionTabIdRef.current = null;
+      } else processNextInQueue();
     }
   };
 
@@ -933,11 +983,12 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       files: t.files.map(f => f.id === id ? { ...f, isVerifying: true } : f)
     } : t));
 
-    let targetDir = tab.settings.localSavePath;
-    if (tab.settings.saveInSourceFolder && file.path) {
-      targetDir = file.path.substring(0, Math.max(file.path.lastIndexOf('/'), file.path.lastIndexOf('\\')));
+    const outputPath = file.outputPath;
+    if (!outputPath) {
+      setTabs(prev => prev.map(t => t.id === targetTabId ? { ...t, files: t.files.map(f => f.id === id ? { ...f, isVerifying: false } : f) } : t));
+      showToast('error', lang === 'ja' ? '保存済みの出力パスがありません。再変換してください。' : 'Saved output path missing. Convert again.');
+      return;
     }
-    const outputPath = `${targetDir}/${file.name}`;
 
     addLogToTab(targetTabId, lang === 'ja' ? `[${file.name}] 再検証を実行中...` : `[${file.name}] Re-running quality verification...`, 'info');
     const isLosslessPair = ['WAV', 'FLAC', 'ALAC'].includes(file.originalFormat.toUpperCase()) &&
@@ -999,17 +1050,15 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     if (!targetTabId) return;
 
     conversionQueueRef.current = [];
-    if (activeConversionIdRef.current) {
-      updateFileStatus(targetTabId, activeConversionIdRef.current, 'failed', 0, lang === 'ja' ? 'オペレーターによって処理が中断されました。' : 'Conversion aborted by operator');
-      addLogToTab(targetTabId, lang === 'ja' ? '処理が手動で中断されました。' : 'Pipeline aborted manually by operator.', 'error');
-    }
-    setIsConverting(false);
-    activeConversionIdRef.current = null;
-    activeConversionTabIdRef.current = null;
-    showToast('error', lang === 'ja' ? 'バッチ処理をキャンセルしました。' : 'Batch pipeline canceled.');
+    const job = jobRef.current;
+    if (!job || job.cancelled) return;
+    job.cancelled = true;
+    window.ipc.invoke('cancel-conversion-job', job.id).catch(error => {
+      addLogToTab(targetTabId, `Cancellation request failed: ${error.message}`, 'error');
+    });
+    showToast('info', lang === 'ja' ? '処理を停止しています…' : 'Stopping conversion…');
   };
 
-  const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const handleUpdateTags = (id: string, newTags: Partial<MetadataTags>) => {
     const targetTabId = activeTabId;
@@ -1027,10 +1076,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       return t;
     }));
     addLogToTab(targetTabId, lang === 'ja' ? `トラック ID: ${id} のメタデータタグを更新しました。` : `Updated metadata tags for track ID: ${id}`, 'info');
-    showToast('success', lang === 'ja' ? 'メタデータをファイルヘッダーに保存しました。' : 'Metadata tags written successfully to file header.');
+    showToast('success', lang === 'ja' ? '出力用メタデータを更新しました。変換時に保存します。' : 'Output metadata updated. It will be saved on conversion.');
   };
 
   const handleResetQueueStatus = () => {
+    if (activeConversionTabIdRef.current) return;
     const targetTabId = activeTabId;
     setTabs(prev => prev.map(t => {
       if (t.id === targetTabId) {
@@ -1044,6 +1094,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             verificationResult: undefined,
             convertedAudioUrl: null,
             convertedBlob: null,
+            outputPath: undefined,
             outputFormat: t.settings.outputFormat,
             bitrate: t.settings.bitrate,
             sampleRate: t.settings.sampleRate,

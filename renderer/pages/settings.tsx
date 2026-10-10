@@ -584,7 +584,7 @@ export default function SettingsPage() {
                     <span>Auto Quality & Data Loss Verification</span>
                   </span>
                   <span className="text-[10px] text-zinc-500 font-mono leading-tight block">
-                    Verify PCM MD5 bit-exact match & signal degradation after conversion
+                    Verify PCM SHA-256 bit-exact match & signal degradation after conversion
                   </span>
                 </div>
                 <button
@@ -700,7 +700,7 @@ export default function SettingsPage() {
               <div className="space-y-2">
                 <div className="flex justify-between text-xs font-mono">
                   <span className="text-zinc-400">PARALLEL CONVERSION CORES</span>
-                  <span className="text-emerald-400 font-bold">{settings.threadPoolSize} CORES</span>
+                  <span className="text-emerald-400 font-bold">{settings.threadPoolSize} FFmpeg threads</span>
                 </div>
                 <input
                   type="range"

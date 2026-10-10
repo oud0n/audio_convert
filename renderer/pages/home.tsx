@@ -1591,7 +1591,7 @@ export default function HomeDashboardPage() {
                       <div className="space-y-1.5 pt-2 border-t border-zinc-800/40 text-[11px]">
                         <div className="flex justify-between">
                           <span className="text-zinc-500">波形類似度 (相関率):</span>
-                          <span className="text-emerald-400 font-bold">{selectedFile.verificationResult.correlationPercent}%</span>
+                          <span className="text-emerald-400 font-bold">{selectedFile.verificationResult.correlationPercent == null ? '未測定' : `${selectedFile.verificationResult.correlationPercent}%`}</span>
                         </div>
                         <div className="flex justify-between">
                           <span className="text-zinc-500">S/N比 (Signal-to-Noise Ratio):</span>
@@ -1604,24 +1604,24 @@ export default function HomeDashboardPage() {
                         <div className="flex justify-between">
                           <span className="text-zinc-500">高音域カットオフ (Cutoff):</span>
                           <span className={selectedFile.verificationResult.hasHighFreqCutoff ? 'text-amber-400 font-bold' : 'text-zinc-400'}>
-                            {selectedFile.verificationResult.hasHighFreqCutoff ? `検出あり (~${(selectedFile.verificationResult.cutoffFreqHz || 16000)/1000}kHz)` : '未検出 (広帯域維持)'}
+                            {selectedFile.verificationResult.hasHighFreqCutoff ? `検出あり (~${(selectedFile.verificationResult.cutoffFreqHz || 16000)/1000}kHz)` : '未測定'}
                           </span>
                         </div>
                       </div>
                     </div>
 
-                    {/* Detailed Logs & MD5 Compare Card */}
+                    {/* Detailed Logs & SHA-256 Compare Card */}
                     <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 space-y-2.5">
-                      <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider block border-b border-zinc-800/60 pb-2">PCM MD5 ハッシュ比較 & 診断ログ</span>
+                      <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider block border-b border-zinc-800/60 pb-2">PCM SHA-256 ハッシュ比較 & 診断ログ</span>
                       
                       <div className="space-y-1 text-[10px]">
-                        <div className="text-zinc-400">元PCM MD5:</div>
+                        <div className="text-zinc-400">元PCM SHA-256:</div>
                         <div className="bg-zinc-950 px-2 py-1 rounded text-zinc-300 font-mono border border-zinc-850 truncate select-all">
-                          {selectedFile.verificationResult.originalMd5 || 'N/A'}
+                          {selectedFile.verificationResult.originalHash || 'N/A'}
                         </div>
-                        <div className="text-zinc-400 pt-1">変換後PCM MD5:</div>
+                        <div className="text-zinc-400 pt-1">変換後PCM SHA-256:</div>
                         <div className="bg-zinc-950 px-2 py-1 rounded text-zinc-300 font-mono border border-zinc-850 truncate select-all">
-                          {selectedFile.verificationResult.convertedMd5 || 'N/A'}
+                          {selectedFile.verificationResult.convertedHash || 'N/A'}
                         </div>
                       </div>
 
@@ -1785,7 +1785,7 @@ export default function HomeDashboardPage() {
                 <div className="pt-2 border-t border-zinc-800 space-y-2 text-[10px] text-zinc-500 leading-normal">
                   <div className="flex justify-between">
                     <span>{lang === 'ja' ? 'マルチスレッド変換コア数:' : 'Multi-thread conversion cores:'}</span>
-                    <span className="text-zinc-400 font-bold">{settings.threadPoolSize} CORES</span>
+                    <span className="text-zinc-400 font-bold">{settings.threadPoolSize} FFmpeg threads</span>
                   </div>
                   <input
                     type="range"

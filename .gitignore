@@ -15,3 +15,8 @@ sample/
 
 output_test.*
 *.log
+
+# Local audio test fixtures (not redistributed)
+for_test/
+
+.DS_Store

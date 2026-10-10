@@ -25,12 +25,12 @@ export interface MetadataTags {
 export interface QualityVerificationResult {
   verifiedAt: string;
   isLosslessPair: boolean;
-  exactMatch: boolean; // MD5 100% Bit-exact Match
-  originalMd5?: string;
-  convertedMd5?: string;
+  exactMatch: boolean; // SHA-256 100% Bit-exact Match
+  originalHash?: string;
+  convertedHash?: string;
   snrDb?: number; // Signal-to-Noise ratio in dB
   maxDiffDb?: number; // Max peak difference in dB
-  correlationPercent: number; // Waveform similarity correlation (0 - 100%)
+  correlationPercent?: number; // Waveform similarity correlation (0 - 100%)
   hasHighFreqCutoff: boolean; // High frequency cutoff detection (e.g. MP3 ~16kHz)
   cutoffFreqHz?: number; // Estimated cutoff frequency
   status: 'perfect' | 'passed' | 'warning' | 'degraded';
@@ -42,6 +42,7 @@ export interface AudioFile {
   id: string;
   name: string;
   outputFileName?: string;
+  outputPath?: string;
   path?: string; // absolute local path resolved via preload webUtils
   size: number;
   duration: number; // in seconds

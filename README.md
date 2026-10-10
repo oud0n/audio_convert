@@ -19,10 +19,10 @@ Next.js と Electron (Nextron) で構築された、デスクトップ向けの�
   - ブラウザでデコードできない一部の形式（ALAC/M4Aなど）については、メインプロセス側の Node.js 音声デコーダーによる安全なフォールバック処理を自動で起動します。
 * **オーディオ品質＆データ欠損検証 (Quality Audit & Lossless Verification)**:
   - 変換前後の音声データを数学的・音響学的に比較・検証する品質判定機能を搭載。
-  - **100%完全一致検証 (Bit-exact PCM MD5 Checksum)**: 可逆圧縮（WAV ⇄ FLAC ⇄ ALAC）間などの変換において、PCMデータに1ビットの違いもないこと（MD5ハッシュ完全一致）を数学的に診断・表示します。
-  - **音響波形比較＆帯域解析**: 有可逆圧縮（MP3/AAC等）や音量正規化適用時、S/N比(SNR dB)、最大波形差分(Peak Difference dB)、波形類似度(相関率%)、および16kHz以上の高音域カットオフ有無を自動解析・ビジュアル化します。
+  - **100%完全一致検証 (Bit-exact PCM SHA-256 Checksum)**: 可逆圧縮（WAV ⇄ FLAC ⇄ ALAC）間などの変換において、PCMデータに1ビットの違いもないこと（SHA-256ハッシュ完全一致）を数学的に診断・表示します。
+  - **音響波形比較**: 非可逆圧縮（MP3/AAC等）や音量正規化適用時、S/N比(SNR dB)、最大波形差分(Peak Difference dB)、波形類似度(相関率%)を表示します。高域カットオフ解析は未実装のため「未測定」と表示します。
 * **ソース品質を無劣化で維持 (Same as Source) モード**:
-  - 元音源のサンプリングレート・ビット深度をそのまま自動維持し、音響スケーリングによる波形変化を招く正規化やトリムを自動バイパスして完全無劣化出力するダイレクトモードに対応しています。
+  - 元音源のサンプリングレート・チャンネル構成・対応するビット深度を維持し（ビット深度を持たない非可逆音源のPCM出力は24bit）、正規化・音量変更・トリムをバイパスします。出力形式が元の精度を保持できない場合はエラーを表示します。MP3/AAC等の非可逆出力は無劣化ではありません。
 * **メタデータ（ID3タグなど）の読み込み・編集**:
   - 変換前に、タイトル、アーティスト、アルバム、アルバムアーティスト、ディスク番号、トラック番号、リリース年、ジャンル、コメントなどのタグ情報を一覧で表示・直接編集できます。
 * **タグ情報に基づく自動ファイルリネーム**:
@@ -31,7 +31,7 @@ Next.js と Electron (Nextron) で構築された、デスクトップ向けの�
   - 変換完了後、ワンクリックで全トラックのステータスを待機中に戻す「キュー状態をリセット」ボタンを標準搭載。
   - 変換完了後、元のソースファイルを安全にゴミ箱へ移動するオプション（Electronの安全なAPIを使用）。
   - 音声データの音量ノーマライズ（正規化）、無音区間の自動トリミング機能。
-  - スレッドプールサイズやサンプリングレート、ビット深度、チャンネル数、ビットレートの微調整。
+  - FFmpegエンコードスレッド数やサンプリングレート、ビット深度、チャンネル数、ビットレートの微調整。
 * **多言語対応 (Localization)**:
   - 上部メニューから日本語と英語の表示言語をワンクリックで切り替えることができます。
 
@@ -51,14 +51,14 @@ npm run dev
 ```bash
 npm run build
 ```
-※ ビルド実行時に自動的に Next.js の古い型定義キャッシュ（`renderer/.next`）がクリーンアップされ、`dist/Audio Converter Setup 1.0.0.exe` (NSIS インストーラー) および `dist/Audio Converter-1.0.0-win.zip` (Zip 圧縮パッケージ) が同時に生成されます。
+※ ビルド実行時に自動的に Next.js の古い型定義キャッシュ（`renderer/.next`）がクリーンアップされ、`dist/Audio Converter Setup 1.0.5.exe` (NSIS インストーラー) および `dist/Audio Converter-1.0.5-win.zip` (Zip 圧縮パッケージ) が同時に生成されます。
 
 ### 課題点・既知の制限事項
 
 * **検証済みの出力フォーマット**:
-  - 本アプリの変換機能は、現在のところ**出力フォーマットとして `FLAC` および `WAV` のみで動作検証**を行っています。その他の形式への変換については、正常にエンコードされない、または一部のメタデータが引き継がれない可能性があります。
+  - 本アプリの変換機能は、現在のところ**提示音源を使って `FLAC`・`WAV`・`ALAC` 出力を動作検証**を行っています。その他の形式への変換については、正常にエンコードされない、または一部のメタデータが引き継がれない可能性があります。
 * **アートワーク（アルバムアート）の欠落**:
-  - 音声ファイルの変換（デコード・再エンコード）処理を行う際、基本的なテキストタグ情報（タイトル、アーティスト等）は保持されますが、**埋め込まれているアルバムアート（画像データ）は変換後のファイルから欠落します**。あらかじめご了承ください。
+  - 音声ファイルの変換（デコード・再エンコード）処理を行う際、基本的なテキストタグ情報（タイトル、アーティスト等）は保持されますが、**MP3・FLAC・M4A・ALACでは先頭の埋め込み画像を保持します**。WAV・AIFFなど他の形式では画像を保持しません。
 
 ---
 
@@ -77,10 +77,10 @@ Featuring an intuitive multi-tab (multi-job) interface, you can organize and bat
   - Automatic fallback to main-process Node.js/FFmpeg audio decoder for formats unsupported natively by browsers (e.g. ALAC/M4A).
 * **Audio Quality & Data Loss Verification (Audit Engine)**:
   - Built-in mathematical and acoustic auditing to compare source vs converted audio.
-  - **100% Bit-exact PCM MD5 Checksum**: Verifies bit-for-bit identity (zero loss) for lossless conversions (WAV ⇄ FLAC ⇄ ALAC).
-  - **Waveform & Spectral Differential Analysis**: Calculates Signal-to-Noise Ratio (SNR dB), Peak Difference (dB), Waveform Correlation (%), and 16kHz high-frequency cutoff detection for lossy or normalized conversions.
+  - **100% Bit-exact PCM SHA-256 Checksum**: Verifies bit-for-bit identity (zero loss) for lossless conversions (WAV ⇄ FLAC ⇄ ALAC).
+  - **Waveform & Spectral Differential Analysis**: Calculates Signal-to-Noise Ratio (SNR dB), Peak Difference (dB), Waveform Correlation (%), for lossy or normalized conversions. Spectral cutoff detection is not implemented and is displayed as unmeasured.
 * **Same as Source (Lossless Direct) Mode**:
-  - Preserves original audio sampling rate and bit depth, automatically bypassing normalization and scaling to output 100% lossless identical audio.
+  - Preserves source sample rate, channel layout, and supported PCM precision while bypassing normalization, gain and trimming. Unsupported precision produces an error. Lossy formats such as MP3/AAC remain lossy.
 * **Metadata (ID3 Tag) Inspection & Editing**:
   - View and edit Title, Artist, Album, Album Artist, Disc #, Track #, Year, Genre, and Comments prior to batch processing.
 * **Tag-Based Automatic File Renaming**:
@@ -88,8 +88,8 @@ Featuring an intuitive multi-tab (multi-job) interface, you can organize and bat
 * **Advanced Processing & One-Click Queue Reset**:
   - One-click "Reset Queue Status" button to reset completed/failed files back to queued for instant re-processing with updated parameters.
   - Safe source file trash option via native Electron API upon conversion completion.
-  - Peak loudness normalization (EBU R128 scaling) and automatic silence trimming.
-  - Fine-grained control over thread pool size, sample rates, bit depth, channel layouts, and bitrates.
+  - Peak amplitude normalization and automatic silence trimming.
+  - Fine-grained control over FFmpeg encoder threads, sample rates, bit depth, channel layouts, and bitrates.
 * **Multi-Language Support (Localization)**:
   - Instant UI toggle between Japanese and English.
 
@@ -109,11 +109,29 @@ npm run dev
 ```bash
 npm run build
 ```
-* Executing the build automatically purges stale Next.js cache (`renderer/.next`) and packages both `dist/Audio Converter Setup 1.0.0.exe` (NSIS Installer) and `dist/Audio Converter-1.0.0-win.zip` (Portable Zip Archive).
+* Executing the build automatically purges stale Next.js cache (`renderer/.next`) and packages both `dist/Audio Converter Setup 1.0.5.exe` (NSIS Installer) and `dist/Audio Converter-1.0.5-win.zip` (Portable Zip Archive).
 
 ### Known Limitations
 
 * **Validated Output Formats**:
-  - Core encoding logic has been primarily validated for **`FLAC` and `WAV` output formats**. Outputting to other compressed codecs may have partial metadata preservation or encoding limits.
+  - Core encoding logic has been primarily validated for **`FLAC`, `WAV` and `ALAC` outputs with the supplied local fixture**. Outputting to other compressed codecs may have partial metadata preservation or encoding limits.
 * **Embedded Cover Artwork**:
-  - Text metadata tags (Title, Artist, Album, etc.) are preserved, but **embedded album cover artwork (image binary) is currently omitted** in transcode operations.
+  - Text metadata tags (Title, Artist, Album, etc.) are preserved, but **the first embedded cover image is preserved for MP3, FLAC, M4A and ALAC**. Other outputs, including WAV and AIFF, omit artwork.
+
+
+### 変換・検証の実装仕様 / Conversion and verification
+
+- WAVのテキストタグはUnicode対応のID3v2.3として保存します。
+- 保存はFFmpegで一元処理し、ブラウザの音声バッファは出力生成に使用しません。プレビューは保存された出力から生成します。
+- ピーク正規化を有効にした場合はピーク目標値を優先し、手動音量変更は適用しません。無音トリムは先頭・末尾を対象とします。
+- 出力名のみNFC正規化し、Windows禁止文字・予約名・長すぎる名前を処理します。入力パスは変更しません。同名ファイルは連番で保存します。
+- 完成した出力を同じ保存先の一時ファイルからハードリンクで確定します。FAT/exFAT等のハードリンク非対応の保存先では排他的に新規ファイルを作成し、コピー失敗時には削除します。元ファイルや既存出力を上書きしません。
+- PCM完全一致は、元の精度を保持したfloat64 PCMのSHA-256とサンプルレート・チャンネル数・PCMバイト数で判断します。これはコンテナやタグを含むファイル全体の一致ではありません。
+- 音声構成が異なる場合は完全一致とせず、波形比較は実行しません。ハッシュ・波形解析失敗は検証失敗として扱います。
+- 自動検証が有効な場合、検証失敗やwarning/degradedの出力では元ファイルをゴミ箱へ移しません。
+- Windows/macOS/Linux CIで生成音源を使う回帰テストを実行します。`npm run typecheck` と `npm test` でローカル検証できます。`FFMPEG_PATH` で検証する実行ファイルを指定できます。
+- ログはElectronのuserData内の `debug_ipc.log` に保存します。
+- キャンセルは実行中のFFmpeg（正規化解析・変換・プレビュー・自動検証）を停止し、停止完了まで新しいバッチを開始しません。保存確定済みの出力は保持します。元ファイルのゴミ箱移動を既にOSへ依頼した場合、その操作は取り消せません。
+- 正規化解析と変換の進捗はFFmpegの処理時刻から表示します。バッチ終了通知は成功・失敗・要確認の件数を表示します。
+
+The native FFmpeg pipeline applies conversion settings, preserves supported source precision, and previews the saved output. Output names retain Unicode while sanitizing Windows restrictions. Existing files are never overwritten; publication uses hard links with an exclusive-copy fallback for FAT/exFAT. Exact PCM verification uses float64 PCM SHA-256 plus audio structure and decoded byte count. Failed analysis never passes verification. Optional source trashing is withheld when enabled automatic verification fails or reports warning/degraded.
