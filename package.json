@@ -9,11 +9,21 @@
   "scripts": {
     "dev": "nextron --startup-delay 10000",
     "build": "node -e \"require('fs').rmSync('renderer/.next', {recursive:true,force:true})\" && nextron build",
+    "dev:frontend": "next dev renderer -p 8888",
+    "build:frontend": "next build renderer",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
     "postinstall": "electron-builder install-app-deps",
     "test": "node --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit --jsx react-jsx --moduleResolution bundler --target ES2017"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.12.3",
+    "@tauri-apps/plugin-dialog": "^2.8.2",
+    "@tauri-apps/plugin-fs": "^2.7.0",
+    "@tauri-apps/plugin-opener": "^2.7.1",
+    "@tauri-apps/plugin-shell": "^2.5.0",
     "electron-serve": "^3.0.0",
     "electron-store": "^11.0.2",
     "ffmpeg-static": "^5.3.0",
@@ -21,6 +31,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
+    "@tauri-apps/cli": "^2.12.2",
     "@types/node": "^20.11.16",
     "@types/react": "^19.2.14",
     "electron": "^41.0.3",

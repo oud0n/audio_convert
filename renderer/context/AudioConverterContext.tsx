@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
 import { analyzeAudioBuffer } from '../utils/audioEncoder';
+import { AppBridge } from '../services/bridge';
 
 interface AudioConverterContextType {
   files: AudioFile[];
@@ -70,13 +71,13 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const [activeTabId, _setActiveTabId] = useState<string>('');
 
   const saveSettingsToDisk = (currentTabs: JobTab[], activeId: string) => {
-    if (typeof window === 'undefined' || !window.ipc) return;
+    if (!AppBridge.isAvailable()) return;
     const tabsToSave = currentTabs.map(t => ({
       id: t.id,
       name: t.name,
       settings: t.settings,
     }));
-    window.ipc.invoke('save-settings-file', {
+    AppBridge.saveSettings({
       tabs: tabsToSave,
       activeTabId: activeId,
     }).catch((e) => {
@@ -104,13 +105,13 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   useEffect(() => {
-    if (!window.ipc) return;
-    return window.ipc.on<{ jobId: string; phase: 'normalizing' | 'converting'; progress: number }>('conversion-progress', event => {
+    if (!AppBridge.isAvailable()) return;
+    return AppBridge.onProgress(event => {
       if (event.jobId !== jobRef.current?.id || jobRef.current.cancelled) return;
       const tabId = activeConversionTabIdRef.current;
       const fileId = activeConversionIdRef.current;
       if (tabId && fileId) setTabs(prev => prev.map(tab => tab.id === tabId ? {
-        ...tab, files: tab.files.map(file => file.id === fileId ? { ...file, status: event.phase, progress: event.progress } : file)
+        ...tab, files: tab.files.map(file => file.id === fileId ? { ...file, status: event.phase as any, progress: event.progress } : file)
       } : tab));
     });
   }, []);
@@ -120,9 +121,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   useEffect(() => {
     const initTabs = async () => {
       let defaultPath = '~/Music/Audio-Convert-Outputs';
-      if (typeof window !== 'undefined' && window.ipc) {
+      if (AppBridge.isAvailable()) {
         try {
-          const resolvedPath = await window.ipc.invoke<string>('get-default-save-path');
+          const resolvedPath = await AppBridge.getDefaultSavePath();
           if (resolvedPath) {
             defaultPath = resolvedPath;
             defaultSavePathRef.current = resolvedPath;
@@ -133,9 +134,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       }
 
       let loadedConfig: any = null;
-      if (typeof window !== 'undefined' && window.ipc) {
+      if (AppBridge.isAvailable()) {
         try {
-          loadedConfig = await window.ipc.invoke('load-settings-file');
+          loadedConfig = await AppBridge.loadSettings();
         } catch (e) {
           console.warn('Failed to load settings file:', e);
         }
@@ -428,17 +429,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             (buffer) => {
               addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコードに成功しました。再生時間: ${buffer.duration.toFixed(2)}秒`, 'success');
               
-              const resolveFilePath = (fileObj: File): string => {
-                if (typeof window !== 'undefined' && window.ipc && window.ipc.getPathForFile) {
-                  try {
-                    const resolved = window.ipc.getPathForFile(fileObj);
-                    if (resolved) return resolved;
-                  } catch (pathErr) {
-                    console.warn('Failed to extract file path via webUtils:', pathErr);
-                  }
-                }
-                return (fileObj as any).path || '';
-              };
+              const resolveFilePath = (fileObj: File): string => AppBridge.getPathForFile(fileObj);
 
               const filePath = resolveFilePath(f);
               const info = analyzeAudioBuffer(buffer);
@@ -483,8 +474,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                 resolve({ success: true, fileRecord });
               };
 
-              if (filePath && typeof window !== 'undefined' && window.ipc) {
-                window.ipc.invoke<{ success: boolean; format?: any; tags?: any }>('read-audio-metadata', filePath)
+              if (filePath && AppBridge.isAvailable()) {
+                AppBridge.readAudioMetadata(filePath)
                   .then((metaResult) => {
                     let metaFormat: any = undefined;
                     if (metaResult && metaResult.success) {
@@ -515,37 +506,21 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             (err) => {
               addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコード失敗: ${err?.message || '不明なデコードエラー'}。フォールバック処理を起動します。`, 'error');
               
-              const resolveFilePath = (fileObj: File): string => {
-                if (typeof window !== 'undefined' && window.ipc && window.ipc.getPathForFile) {
-                  try {
-                    const resolved = window.ipc.getPathForFile(fileObj);
-                    if (resolved) return resolved;
-                  } catch (pathErr) {
-                    console.warn('Failed to extract file path via webUtils:', pathErr);
-                  }
-                }
-                return (fileObj as any).path || '';
-              };
+              const resolveFilePath = (fileObj: File): string => AppBridge.getPathForFile(fileObj);
 
               const filePath = resolveFilePath(f);
-              const hasIpc = !!(typeof window !== 'undefined' && window.ipc);
+              const hasIpc = AppBridge.isAvailable();
               
-              addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 診断情報: resolved filePath = "${filePath || 'undefined'}", window.ipc利用可能性 = ${hasIpc}`, 'info');
+              addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 診断情報: resolved filePath = "${filePath || 'undefined'}", AppBridge利用可能性 = ${hasIpc}`, 'info');
 
               if (filePath && hasIpc) {
                 addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPC「decode-audio-to-wav」を呼び出し中 (Path: "${filePath}")...`, 'info');
                 
-                window.ipc.invoke<Uint8Array>('decode-audio-to-wav', filePath)
-                  .then(async (wavBuffer) => {
-                    addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPCデコード成功。WAVバイナリサイズ: ${wavBuffer.byteLength} bytes`, 'success');
+                AppBridge.decodeAudioToWav(filePath)
+                  .then(async (arrayBuffer) => {
+                    addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPCデコード成功。WAVバイナリサイズ: ${arrayBuffer.byteLength} bytes`, 'success');
                     try {
-                      // Extract underlying ArrayBuffer safely
-                      const arrayBuffer = wavBuffer.buffer.slice(
-                        wavBuffer.byteOffset, 
-                        wavBuffer.byteOffset + wavBuffer.byteLength
-                      ) as ArrayBuffer;
-                      
-                      // Read metadata tags using music-metadata in main process
+                      // Read metadata tags using AppBridge
                       let metadataTags = {
                         title: f.name.substring(0, f.name.lastIndexOf('.')) || f.name,
                         artist: 'Unknown Artist',
@@ -561,9 +536,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                       let metaResultObj: any = null;
                       try {
                         addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPC「read-audio-metadata」を呼び出し中...`, 'info');
-                        const metaResult = await window.ipc.invoke<{ success: boolean; format?: any; tags?: any; error?: string }>('read-audio-metadata', filePath);
+                        const metaResult = await AppBridge.readAudioMetadata(filePath);
                         metaResultObj = metaResult;
-                        if (metaResult && metaResult.success) {
+                        if (metaResult && metaResult.success && metaResult.tags) {
                           addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ解析成功: タイトル="${metaResult.tags.title}", アーティスト="${metaResult.tags.artist}"`, 'success');
                           metadataTags = {
                             title: metaResult.tags.title || metadataTags.title,
@@ -574,10 +549,10 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                             year: metaResult.tags.year || metadataTags.year,
                             genre: metaResult.tags.genre || metadataTags.genre,
                             track: metaResult.tags.track || metadataTags.track,
-                            comment: 'Decoded via FFmpeg',
+                            comment: 'Decoded via Native Engine',
                           };
                         } else {
-                          addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ解析失敗 (メインプロセス側): ${metaResult?.error || '不明'}`, 'error');
+                          addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ解析失敗 (バックエンド側): ${metaResult?.error || '不明'}`, 'error');
                         }
                       } catch (metaErr: any) {
                         addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ通信例外: ${metaErr?.message || metaErr}`, 'error');
@@ -629,16 +604,12 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                   })
                   .catch((ipcErr) => {
                     addLogToTab(targetTabId, `[DEBUG] "${f.name}" - エラー: IPC通信「decode-audio-to-wav」失敗 - ${ipcErr.message || ipcErr}`, 'error');
-                    if (window.ipc) {
-                      window.ipc.send('log-debug', `FFmpeg IPC decode failed for: ${f.name}. Error: ${ipcErr.message || ipcErr}`);
-                    }
-                    resolve({ success: false, error: `FFmpegデコード失敗: ${ipcErr.message || ipcErr}` });
+                    AppBridge.logDebug(`FFmpeg IPC decode failed for: ${f.name}. Error: ${ipcErr.message || ipcErr}`);
+                    resolve({ success: false, error: `デコード失敗: ${ipcErr.message || ipcErr}` });
                   });
               } else {
                 addLogToTab(targetTabId, `[DEBUG] "${f.name}" - エラー: フォールバック不能。ファイルパスまたはIPC接続が不足しています (filePath: ${filePath ? 'あり' : 'なし'}, hasIpc: ${hasIpc})`, 'error');
-                if (window.ipc) {
-                  window.ipc.send('log-debug', `Cannot fallback for: ${f.name}. filePath: ${filePath}, hasIpc: ${hasIpc}`);
-                }
+                AppBridge.logDebug(`Cannot fallback for: ${f.name}. filePath: ${filePath}, hasIpc: ${hasIpc}`);
                 const reason = err?.message || 'デコードエラー: 未対応のコーデックか、破損したファイルです。';
                 resolve({ success: false, error: reason });
               }
@@ -791,7 +762,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     };
 
     try {
-      await window.ipc.invoke('start-conversion-job', job.id);
+      await AppBridge.startConversionJob(job.id);
       checkActive();
 
       const buffer = fileRecord.originalAudioBuffer;
@@ -846,9 +817,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
 
       let verificationResult: any = undefined;
       // 1. Save to local disk via IPC
-      if (typeof window !== 'undefined' && window.ipc) {
+      if (AppBridge.isAvailable()) {
         addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ファイルをディスクに書き込み中...` : `[${fileRecord.name}] Writing file to disk...`, 'info');
-        const saveResult = await window.ipc.invoke<{ success: boolean; path?: string; fileName?: string; error?: string }>('save-converted-file', {
+        const saveResult = await AppBridge.saveConvertedFile({
           jobId: job.id,
           settings: tabSettings,
           inputFilePath: fileRecord.path,
@@ -867,9 +838,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           savedOutputPath = savedPath;
           finalExportName = saveResult.fileName || finalExportName;
           try {
-            const preview = await window.ipc.invoke<Uint8Array>('read-output-preview', savedPath, job.id);
+            const preview = await AppBridge.readOutputPreview(savedPath, job.id);
             checkActive();
-            wavBlob = new Blob([new Uint8Array(preview).buffer], { type: 'audio/wav' });
+            wavBlob = new Blob([preview], { type: 'audio/wav' });
             convertedUrl = URL.createObjectURL(wavBlob);
           } catch (previewError) {
             addLogToTab(tabId, `Output saved; preview unavailable: ${String(previewError)}`, 'info');
@@ -885,7 +856,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           const isLosslessPair = ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.originalFormat.toUpperCase()) &&
                                 ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.outputFormat.toUpperCase());
           try {
-            const vRes = await window.ipc.invoke<{ success: boolean; result?: any; error?: string }>('verify-audio-quality', {
+            const vRes = await AppBridge.verifyAudioQuality({
               jobId: job.id,
               originalPath: fileRecord.path,
               convertedPath: savedPath,
@@ -913,9 +884,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
 
       // 3. Trash original file if deleteOriginalAfterConvert is active
       let originalDeleted = false;
-      if (tabSettings.deleteOriginalAfterConvert && savedOutputPath !== fileRecord.path && (!tabSettings.autoVerifyQuality || verificationResult?.status === 'perfect' || verificationResult?.status === 'passed') && fileRecord.path && typeof window !== 'undefined' && window.ipc) {
+      if (tabSettings.deleteOriginalAfterConvert && savedOutputPath !== fileRecord.path && (!tabSettings.autoVerifyQuality || verificationResult?.status === 'perfect' || verificationResult?.status === 'passed') && fileRecord.path && AppBridge.isAvailable()) {
         addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動中...` : `[${fileRecord.name}] Moving original file to trash...`, 'info');
-        const trashResult = await window.ipc.invoke<{ success: boolean; error?: string }>('trash-file', fileRecord.path, job.id);
+        const trashResult = await AppBridge.trashFile(fileRecord.path, job.id);
         if (trashResult && trashResult.success) {
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動しました。` : `[${fileRecord.name}] Moved original file to trash.`, 'success');
           originalDeleted = true;
@@ -957,7 +928,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換失敗: ${err.message}` : `[${fileRecord.name}] Conversion failed: ${err.message}`, 'error');
       updateFileStatus(tabId, id, 'failed', 0, err.message || 'Pipeline buffer overflow');
     } finally {
-      await window.ipc.invoke('finish-conversion-job', job.id).catch(() => {});
+      await AppBridge.finishConversionJob(job.id).catch(() => {});
       jobRef.current = null;
       if (job.cancelled) {
         const message = lang === 'ja' ? `バッチ中断: 成功 ${batchRef.current.success}件、失敗 ${batchRef.current.failed}件` : `Batch cancelled: ${batchRef.current.success} succeeded, ${batchRef.current.failed} failed`;
@@ -974,7 +945,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     const targetTabId = activeTabId;
     const tab = tabs.find(t => t.id === targetTabId);
     const file = tab?.files.find(f => f.id === id);
-    if (!tab || !file || !file.path || typeof window === 'undefined' || !window.ipc) {
+    if (!tab || !file || !file.path || !AppBridge.isAvailable()) {
       showToast('error', lang === 'ja' ? 'ソースファイルのパスが存在しません。' : 'Source file path missing');
       return;
     }
@@ -996,7 +967,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                           ['WAV', 'FLAC', 'ALAC'].includes(file.outputFormat.toUpperCase());
 
     try {
-      const vRes = await window.ipc.invoke<{ success: boolean; result?: any; error?: string }>('verify-audio-quality', {
+      const vRes = await AppBridge.verifyAudioQuality({
         originalPath: file.path,
         convertedPath: outputPath,
         isLosslessPair,
@@ -1054,7 +1025,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     const job = jobRef.current;
     if (!job || job.cancelled) return;
     job.cancelled = true;
-    window.ipc.invoke('cancel-conversion-job', job.id).catch(error => {
+    AppBridge.cancelConversionJob(job.id).catch(error => {
       addLogToTab(targetTabId, `Cancellation request failed: ${error.message}`, 'error');
     });
     showToast('info', lang === 'ja' ? '処理を停止しています…' : 'Stopping conversion…');

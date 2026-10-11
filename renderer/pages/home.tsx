@@ -14,6 +14,7 @@ import {
 import { estimateOutputSize } from '../utils/audioEncoder';
 import { MetadataTags, getFormatExtension } from '../types';
 import { t } from '../utils/i18n';
+import { AppBridge, isTauri } from '../services/bridge';
 
 export default function HomeDashboardPage() {
   const {
@@ -487,14 +488,7 @@ export default function HomeDashboardPage() {
       if (item.kind === 'file') {
         const entry = item.webkitGetAsEntry();
         if (entry) {
-          let topLevelPath = '';
-          if (typeof window !== 'undefined' && window.ipc && window.ipc.getPathForFile) {
-            try {
-              topLevelPath = window.ipc.getPathForFile(dataTransfer.files[i]);
-            } catch (pathErr) {
-              console.warn('webUtils.getPathForFile failed:', pathErr);
-            }
-          }
+          let topLevelPath = AppBridge.getPathForFile(dataTransfer.files[i]);
           if (!topLevelPath) {
             topLevelPath = (dataTransfer.files[i] as any)?.path || '';
           }
@@ -518,6 +512,37 @@ export default function HomeDashboardPage() {
       }
     }
   };
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | null = null;
+    import('@tauri-apps/api/webviewWindow')
+      .then(({ getCurrentWebviewWindow }) => {
+        getCurrentWebviewWindow()
+          .onDragDropEvent(async (event) => {
+            if (event.payload.type === 'drop') {
+              const paths = event.payload.paths;
+              if (paths && paths.length > 0) {
+                const fileObjects: File[] = [];
+                for (const p of paths) {
+                  const name = p.replace(/^.*[\\/]/, '');
+                  const file = new File([], name);
+                  (file as any).path = p;
+                  fileObjects.push(file);
+                }
+                handleAddFiles(fileObjects);
+              }
+            }
+          })
+          .then((fn) => {
+            unlisten = fn;
+          });
+      })
+      .catch(() => {});
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [handleAddFiles]);
 
   const formatSize = (bytes: number) => {
     if (bytes === 0) return '0 B';
@@ -1069,9 +1094,9 @@ export default function HomeDashboardPage() {
                       />
                       <button 
                         onClick={async () => {
-                          if (window.ipc) {
+                          if (AppBridge.isAvailable()) {
                             try {
-                              const selectedDir = await window.ipc.invoke<string | null>('select-directory');
+                              const selectedDir = await AppBridge.selectDirectory();
                               if (selectedDir) updateSetting('localSavePath', selectedDir);
                             } catch (err) {
                               console.warn('Failed to invoke select-directory:', err);

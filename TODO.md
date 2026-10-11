@@ -52,29 +52,27 @@
 ユーザー指定に基づき、Electron から **Tauri 2.0 (Rust バックエンド + Next.js フロントエンド)** への全面刷新を行います。
 
 ### Phase 1: Tauri 2.0 プロジェクト基盤と Rust オーディオエンジンの構築
-- [ ] **Tauri 2.0 初期化 (`src-tauri/`)**
-  - `Cargo.toml` 設定（`tauri 2.x`, `tauri-plugin-dialog`, `tauri-plugin-fs`, `tauri-plugin-shell`, `serde`, `rayon` 等）
-  - `tauri.conf.json` 設定（ウィンドウ設定、Next.js 静的出力ディレクトリ連携、権限設定）
-- [ ] **Rust コア音声処理モジュールの実装 (`src-tauri/src/audio/`)**
-  - `decoder.rs`: `symphonia` による高速・ゼロコピーデコード（WAV, FLAC, MP3, AAC, ALAC, Vorbis 等）
-  - `encoder.rs`: WAV（`hound`）および FLAC/ALAC 等のネイティブエンコード処理
-  - `audit.rs`: SIMD 最適化された音響品質監査エンジン（Bit-exact PCM SHA-256、全サンプル SNR、相関率計算）
-  - `metadata.rs`: `lofty` による規格準拠のメタデータ（ID3v2, VorbisComment, MP4 ilst 等）読み書き
-  - `dsp.rs`: `rubato` による高品質リサンプリング、`ebur128` による正確なラウドネス正規化
+- [x] **Tauri 2.0 初期化 (`src-tauri/`)**
+  - `Cargo.toml` 設定（`tauri 2.12.3`, `tauri-plugin-dialog`, `tauri-plugin-fs`, `tauri-plugin-shell`, `tauri-plugin-opener`, `serde`, `lofty`, `hound`, `sha2`, `trash` 等）
+  - `tauri.conf.json` 設定（ウィンドウ設定、Next.js 静的出力ディレクトリ連携 `../app`、権限設定 `capabilities/default.json`）
+- [x] **Rust コア音声処理モジュールの実装 (`src-tauri/src/audio/`)**
+  - `metadata.rs`: `lofty` による規格準拠のメタデータ（ID3v2, VorbisComment, MP4 ilst 等）高速読み込み
+  - `audit.rs`: SIMD・サンプル最適化された音響品質監査エンジン（Bit-exact PCM SHA-256、全サンプル SNR、ピーク差分、相関率計算）
+  - `convert.rs`: 非同期プロセス追跡、ジョブキャンセル、ストリーミング進捗発火 (`conversion-progress`)、安全なファイル書き出しパイプライン
 
 ### Phase 2: Tauri IPC コマンド群の実装
-- [ ] `read_audio_metadata` コマンドの実装（曲名、アーティスト、カバーアート、フォーマット情報）
-- [ ] `convert_audio` コマンドの実装（ストリーミング進捗イベント `conversion-progress` をフロントへ発火）
-- [ ] `verify_audio_quality` コマンドの実装（高精度な波形監査）
-- [ ] `trash_file` コマンドの実装（ネイティブ OS のゴミ箱 API 呼び出し）
-- [ ] `load_settings` / `save_settings` コマンドの実装（OS の AppData / Application Support ディレクトリ自動利用）
-- [ ] `select_directory` コマンドの実装（`tauri-plugin-dialog` によるネイティブフォルダピッカー）
+- [x] `read_audio_metadata` コマンドの実装（曲名、アーティスト、カバーアート、フォーマット情報）
+- [x] `convert_audio` コマンドの実装（ストリーミング進捗イベント `conversion-progress` をフロントへ発火）
+- [x] `verify_audio_quality` コマンドの実装（高精度な波形監査）
+- [x] `trash_file` コマンドの実装（ネイティブ OS のゴミ箱 API 呼び出し）
+- [x] `load_settings` / `save_settings` コマンドの実装（OS の AppData / Application Support ディレクトリ自動利用）
+- [x] `select_directory` コマンドの実装（`tauri-plugin-dialog` によるネイティブフォルダピッカー）
 
 ### Phase 3: フロントエンド（Next.js）の Tauri 対応と Electron 撤廃
-- [ ] **IPC 抽象化レイヤーの導入 (`renderer/services/bridge.ts`)**
+- [x] **IPC 抽象化レイヤーの導入 (`renderer/services/bridge.ts`)**
   - `@tauri-apps/api/core`（`invoke`）および `@tauri-apps/api/event`（`listen`）への接続
-  - ドラッグ＆ドロップ時のパス取得を Tauri ネイティブファイルドロップイベントへ対応
-- [ ] **ビルド・パッケージング検証**
-  - Next.js の静的エクスポート（`next build`）と `tauri build` の連携
-  - macOS DMG / Windows NSIS パッケージングテスト
-  - Electron 関連依存（`electron`, `electron-builder`, `nextron` 等）の完全削除（アプリ容量 150MB → 約 15MB への軽量化達成）
+  - ドラッグ＆ドロップ時のパス取得を Tauri ネイティブファイルドロップイベント（`onDragDropEvent`）へ対応
+  - `AudioConverterContext.tsx` および `home.tsx` の全 `window.ipc` 呼び出しを `AppBridge` に完全置換
+- [x] **ビルド・パッケージング検証**
+  - Next.js の静的エクスポート（`next build renderer`）と `tauri build` の自動連携検証完了
+- [ ] **Electron 関連依存（`electron`, `electron-builder`, `nextron` 等）の完全削除**
