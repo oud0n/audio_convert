@@ -66,6 +66,7 @@ export default function HomeDashboardPage() {
 
   // Playback Auditing States
   const [isPlaying, setIsPlaying] = useState(false);
+  const isPlayingRef = useRef(false);
   const [playbackTime, setPlaybackTime] = useState(0);
   const [playbackProgress, setPlaybackProgress] = useState(0);
   const [volume, setVolume] = useState(0.8);
@@ -253,6 +254,7 @@ export default function HomeDashboardPage() {
 
     source.start(0, offset);
     startTimeRef.current = ctx.currentTime - offset;
+    isPlayingRef.current = true;
     setIsPlaying(true);
 
     if (animationFrameRef.current) {
@@ -260,10 +262,11 @@ export default function HomeDashboardPage() {
     }
 
     const updateProgress = () => {
-      if (!ctx || !isPlaying) return;
+      if (!ctx || !isPlayingRef.current) return;
       const elapsed = ctx.currentTime - startTimeRef.current;
       
       if (elapsed >= duration) {
+        isPlayingRef.current = false;
         setIsPlaying(false);
         setPlaybackTime(0);
         setPlaybackProgress(0);
@@ -294,6 +297,7 @@ export default function HomeDashboardPage() {
       const elapsed = ctx.currentTime - startTimeRef.current;
       pausedAtRef.current = elapsed;
     }
+    isPlayingRef.current = false;
     setIsPlaying(false);
   };
 
@@ -308,6 +312,7 @@ export default function HomeDashboardPage() {
     pausedAtRef.current = 0;
     setPlaybackTime(0);
     setPlaybackProgress(0);
+    isPlayingRef.current = false;
     setIsPlaying(false);
   };
 
@@ -439,12 +444,11 @@ export default function HomeDashboardPage() {
                 // Split and remove the first segment (which matches the topLevelPath folder name)
                 const segments = entry.fullPath.split('/').filter(Boolean);
                 segments.shift(); 
-                const relativePath = segments.join('/');
-                fullPath = topLevelPath + '\\' + relativePath;
+                const isPosix = topLevelPath.includes('/') || !topLevelPath.includes('\\');
+                const sep = isPosix ? '/' : '\\';
+                const relativePath = isPosix ? segments.join('/') : segments.join('\\');
+                fullPath = topLevelPath.replace(/[/\\]+$/, '') + sep + relativePath;
               }
-              
-              // Normalize slashes
-              fullPath = fullPath.replace(/\//g, '\\').replace(/\\\\/g, '\\');
               
               Object.defineProperty(file, 'path', {
                 value: fullPath,

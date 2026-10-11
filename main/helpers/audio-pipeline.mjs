@@ -98,7 +98,7 @@ async function publishOutput(staging, destination, signal) {
   checkCancelled(signal);
   try { await fs.link(staging, destination); return; }
   catch (error) {
-    if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'].includes(error.code)) throw error;
+    if (!['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV'].includes(error.code)) throw error;
   }
   // FAT/exFAT cannot hard-link. Exclusively create a new file and roll it back on failure.
   const output = await fs.open(destination, 'wx');

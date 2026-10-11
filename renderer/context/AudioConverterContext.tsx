@@ -815,25 +815,26 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       let finalExportName = fileRecord.name;
       if (tabSettings.renameByTags && fileRecord.tags) {
         let pattern = tabSettings.renamePattern;
-        pattern = pattern.replace('{artist}', fileRecord.tags.artist || 'Unknown Artist');
-        pattern = pattern.replace('{title}', fileRecord.tags.title || 'Untitled');
-        pattern = pattern.replace('{album}', fileRecord.tags.album || 'Unknown Album');
-        pattern = pattern.replace('{albumArtist}', fileRecord.tags.albumArtist || 'Unknown Artist');
+        const safeSub = (str: string, token: string, val: string) => str.split(token).join(val);
+        pattern = safeSub(pattern, '{artist}', fileRecord.tags.artist || 'Unknown Artist');
+        pattern = safeSub(pattern, '{title}', fileRecord.tags.title || 'Untitled');
+        pattern = safeSub(pattern, '{album}', fileRecord.tags.album || 'Unknown Album');
+        pattern = safeSub(pattern, '{albumArtist}', fileRecord.tags.albumArtist || 'Unknown Artist');
         
         // Handle disc number (default to "1" if not found)
         const rawDisc = fileRecord.tags.disc ? fileRecord.tags.disc.toString().trim() : '1';
         const discInt = parseInt(rawDisc);
         const discStr = isNaN(discInt) ? '1' : discInt.toString();
-        pattern = pattern.replace('{disc}', discStr);
+        pattern = safeSub(pattern, '{disc}', discStr);
         
         // Handle track number (default to "01" if not found, padded to 2 digits)
         const rawTrack = fileRecord.tags.track ? fileRecord.tags.track.toString().trim() : '01';
         const trackInt = parseInt(rawTrack);
         const trackStr = isNaN(trackInt) ? '01' : trackInt.toString().padStart(2, '0');
-        pattern = pattern.replace('{track}', trackStr);
+        pattern = safeSub(pattern, '{track}', trackStr);
         
-        pattern = pattern.replace('{year}', fileRecord.tags.year || '2026');
-        pattern = pattern.replace('{genre}', fileRecord.tags.genre || 'Electronic');
+        pattern = safeSub(pattern, '{year}', fileRecord.tags.year || '2026');
+        pattern = safeSub(pattern, '{genre}', fileRecord.tags.genre || 'Electronic');
         const targetExt = getFormatExtension(fileRecord.outputFormat);
         finalExportName = `${pattern}.${targetExt}`;
       } else {

@@ -199,12 +199,14 @@ ipcMain.handle('trash-file', async (event, filePath: string, jobId?: string) => 
   }
 });
 
-// IPC Handler to load settings.json from current working directory
+// IPC Handler to load settings.json from userData (with cwd fallback for dev)
 ipcMain.handle('load-settings-file', async () => {
-  const settingsPath = path.join(process.cwd(), 'settings.json');
+  const userSettingsPath = path.join(app.getPath('userData'), 'settings.json');
+  const cwdSettingsPath = path.join(process.cwd(), 'settings.json');
+  const targetPath = fs.existsSync(userSettingsPath) ? userSettingsPath : (fs.existsSync(cwdSettingsPath) ? cwdSettingsPath : null);
   try {
-    if (fs.existsSync(settingsPath)) {
-      const data = await fs.promises.readFile(settingsPath, 'utf-8');
+    if (targetPath) {
+      const data = await fs.promises.readFile(targetPath, 'utf-8');
       return JSON.parse(data);
     }
   } catch (err: any) {
@@ -215,9 +217,9 @@ ipcMain.handle('load-settings-file', async () => {
   return null;
 });
 
-// IPC Handler to save settings.json to current working directory
+// IPC Handler to save settings.json to userData directory
 ipcMain.handle('save-settings-file', async (_event, payload) => {
-  const settingsPath = path.join(process.cwd(), 'settings.json');
+  const settingsPath = path.join(app.getPath('userData'), 'settings.json');
   try {
     await fs.promises.writeFile(settingsPath, JSON.stringify(payload, null, 2), 'utf-8');
     return { success: true };
@@ -236,11 +238,14 @@ async function computePcmFingerprint(filePath: string, signal?: AbortSignal) {
   return { ...fingerprint, sampleRate: metadata.format.sampleRate, channels: metadata.format.numberOfChannels };
 }
 
-async function decodeToTempWav(filePath: string, signal?: AbortSignal): Promise<string> {
+async function decodeToTempWav(filePath: string, signal?: AbortSignal, sampleRate?: number): Promise<string> {
   const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'audio-preview-'));
   const tempPath = path.join(directory, 'preview.wav');
   try {
-    await runFFmpeg(getExecutableFFmpegPath() || 'ffmpeg', ['-y', '-i', filePath, '-map', '0:a:0', '-acodec', 'pcm_s16le', '-ac', '2', '-map_metadata', '-1', tempPath], undefined, signal);
+    const args = ['-y', '-i', filePath, '-map', '0:a:0', '-acodec', 'pcm_s16le', '-ac', '2'];
+    if (sampleRate) args.push('-ar', String(sampleRate));
+    args.push('-map_metadata', '-1', tempPath);
+    await runFFmpeg(getExecutableFFmpegPath() || 'ffmpeg', args, undefined, signal);
     // Move out of the working directory so existing callers can unlink the file.
     const result = path.join(os.tmpdir(), `preview_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
     await fs.promises.rename(tempPath, result);
@@ -306,6 +311,8 @@ async function compareWavBuffers(path1: string, path2: string) {
   let snrDb = 100;
   if (mse > 0 && sigPow1 > 0) {
     snrDb = Math.round((10 * Math.log10(sigPow1 / mse)) * 10) / 10;
+  } else if (sigPow1 === 0 && mse > 0) {
+    snrDb = -100;
   }
 
   let maxDiffDb = -100;
@@ -314,8 +321,14 @@ async function compareWavBuffers(path1: string, path2: string) {
   }
 
   const denom = Math.sqrt(sigPow1 * sigPow2);
-  let correlation = 1.0;
-  if (denom > 0) {
+  let correlation = 0.0;
+  if (sigPow1 === 0 && sigPow2 === 0) {
+    correlation = 1.0;
+    snrDb = 100;
+  } else if (sigPow1 === 0 || sigPow2 === 0) {
+    correlation = 0.0;
+    snrDb = -100;
+  } else if (denom > 0) {
     correlation = (dotProd / count) / denom;
   }
   const correlationPercent = Math.max(0, Math.min(100, Math.round(correlation * 10000) / 100));
@@ -377,14 +390,32 @@ ipcMain.handle('verify-audio-quality', async (event, { originalPath, convertedPa
     let tempWavOrig = '';
     let tempWavConv = '';
     let diffMetrics: { maxDiffDb: number; snrDb: number; correlationPercent: number };
-    if (!structureMatch) return { success: true, result: { verifiedAt, isLosslessPair: !!isLosslessPair, exactMatch: false, status: 'warning', originalHash, convertedHash, hasHighFreqCutoff: false, summaryMessage: '音声構成またはサンプル数が異なります。完全一致ではありません。', details: [`Source: ${original.sampleRate}Hz / ${original.channels}ch / ${original.bytes} bytes`, `Output: ${converted.sampleRate}Hz / ${converted.channels}ch / ${converted.bytes} bytes`] } };
+    if (!structureMatch && isLosslessPair) {
+      return {
+        success: true,
+        result: {
+          verifiedAt,
+          isLosslessPair: true,
+          exactMatch: false,
+          status: 'warning',
+          originalHash,
+          convertedHash,
+          hasHighFreqCutoff: false,
+          summaryMessage: '可逆変換ですが音声構成またはサンプル数が異なります。完全一致ではありません。',
+          details: [
+            `Source: ${original.sampleRate}Hz / ${original.channels}ch / ${original.bytes} bytes`,
+            `Output: ${converted.sampleRate}Hz / ${converted.channels}ch / ${converted.bytes} bytes`
+          ]
+        }
+      };
+    }
     let cutoffInfo = { hasCutoff: false, freqHz: undefined as number | undefined };
 
     try {
       // Sequential assignment ensures cleanup if the second decode fails.
-      tempWavOrig = await decodeToTempWav(originalPath, signal);
-      tempWavConv = await decodeToTempWav(convertedPath, signal);
-
+      const compareRate = Math.min(original.sampleRate || 44100, converted.sampleRate || 44100);
+      tempWavOrig = await decodeToTempWav(originalPath, signal, compareRate);
+      tempWavConv = await decodeToTempWav(convertedPath, signal, compareRate);
 
       diffMetrics = await compareWavBuffers(tempWavOrig, tempWavConv);
       // Spectral cutoff is not measured by PCM comparison. Do not claim a detection.
