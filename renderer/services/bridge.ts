@@ -2,7 +2,7 @@
  * IPC Bridge service that abstracts communication between renderer and backend.
  * Seamlessly supports both Electron (legacy) and Tauri 2.0 (native).
  */
-import type { QualityVerificationResult, MetadataTags } from '../types';
+import type { QualityVerificationResult, MetadataTags, ElectronIpcFallback } from '../types';
 
 export interface ProgressPayload {
   jobId: string;
@@ -39,8 +39,12 @@ export function isTauri(): boolean {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 }
 
+function getIpc(): ElectronIpcFallback | undefined {
+  return typeof window !== 'undefined' ? window.ipc : undefined;
+}
+
 export function isElectron(): boolean {
-  return typeof window !== 'undefined' && 'ipc' in window && !!window.ipc;
+  return !!getIpc();
 }
 
 export class AppBridge {
@@ -49,9 +53,10 @@ export class AppBridge {
   }
 
   static getPathForFile(file: File): string {
-    if (isElectron() && window.ipc?.getPathForFile) {
+    const ipc = getIpc();
+    if (ipc?.getPathForFile) {
       try {
-        return window.ipc.getPathForFile(file) || '';
+        return ipc.getPathForFile(file) || '';
       } catch {
         // fallback
       }
@@ -64,8 +69,9 @@ export class AppBridge {
       const { invoke } = await import('@tauri-apps/api/core');
       return await invoke<MetadataResult>('read_audio_metadata', { path: filePath });
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<MetadataResult>('read-audio-metadata', filePath);
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<MetadataResult>('read-audio-metadata', filePath);
     }
     throw new Error('No desktop runtime detected');
   }
@@ -82,8 +88,9 @@ export class AppBridge {
         return await invoke<string | null>('select_directory');
       }
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<string | null>('select-directory');
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<string | null>('select-directory');
     }
     return null;
   }
@@ -93,8 +100,9 @@ export class AppBridge {
       const { invoke } = await import('@tauri-apps/api/core');
       return await invoke<string>('get_default_save_path');
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<string>('get-default-save-path');
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<string>('get-default-save-path');
     }
     return 'Music/Audio-Convert-Outputs';
   }
@@ -104,8 +112,9 @@ export class AppBridge {
       const { invoke } = await import('@tauri-apps/api/core');
       return await invoke<ConvertResult>('convert_audio', { request });
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<ConvertResult>('save-converted-file', request);
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<ConvertResult>('save-converted-file', request);
     }
     throw new Error('No desktop runtime detected');
   }
@@ -119,8 +128,9 @@ export class AppBridge {
       }
       return new Uint8Array(data).buffer as ArrayBuffer;
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<ArrayBuffer>('read-output-preview', filePath, jobId);
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<ArrayBuffer>('read-output-preview', filePath, jobId);
     }
     throw new Error('No desktop runtime detected');
   }
@@ -134,8 +144,9 @@ export class AppBridge {
       }
       return new Uint8Array(data).buffer as ArrayBuffer;
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<ArrayBuffer>('decode-audio-to-wav', filePath);
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<ArrayBuffer>('decode-audio-to-wav', filePath);
     }
     throw new Error('No desktop runtime detected');
   }
@@ -155,8 +166,9 @@ export class AppBridge {
         jobId: params.jobId,
       });
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<VerificationResponse>('verify-audio-quality', params);
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<VerificationResponse>('verify-audio-quality', params);
     }
     throw new Error('No desktop runtime detected');
   }
@@ -166,8 +178,9 @@ export class AppBridge {
       const { invoke } = await import('@tauri-apps/api/core');
       return await invoke<{ success: boolean; error?: string }>('trash_file', { filePath, jobId });
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<{ success: boolean; error?: string }>('trash-file', filePath, jobId);
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<{ success: boolean; error?: string }>('trash-file', filePath, jobId);
     }
     throw new Error('No desktop runtime detected');
   }
@@ -177,8 +190,9 @@ export class AppBridge {
       const { invoke } = await import('@tauri-apps/api/core');
       return await invoke<any>('load_settings');
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<any>('load-settings-file');
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<any>('load-settings-file');
     }
     return null;
   }
@@ -188,8 +202,9 @@ export class AppBridge {
       const { invoke } = await import('@tauri-apps/api/core');
       return await invoke<{ success: boolean; error?: string }>('save_settings', { settings });
     }
-    if (isElectron()) {
-      return await window.ipc.invoke<{ success: boolean; error?: string }>('save-settings-file', settings);
+    const ipc = getIpc();
+    if (ipc) {
+      return await ipc.invoke<{ success: boolean; error?: string }>('save-settings-file', settings);
     }
     return { success: false, error: 'No desktop runtime detected' };
   }
@@ -200,8 +215,9 @@ export class AppBridge {
       await invoke('start_conversion_job', { jobId });
       return;
     }
-    if (isElectron()) {
-      await window.ipc.invoke('start-conversion-job', jobId);
+    const ipc = getIpc();
+    if (ipc) {
+      await ipc.invoke('start-conversion-job', jobId);
     }
   }
 
@@ -211,8 +227,9 @@ export class AppBridge {
       await invoke('cancel_conversion_job', { jobId });
       return;
     }
-    if (isElectron()) {
-      await window.ipc.invoke('cancel-conversion-job', jobId);
+    const ipc = getIpc();
+    if (ipc) {
+      await ipc.invoke('cancel-conversion-job', jobId);
     }
   }
 
@@ -222,8 +239,9 @@ export class AppBridge {
       await invoke('finish_conversion_job', { jobId });
       return;
     }
-    if (isElectron()) {
-      await window.ipc.invoke('finish-conversion-job', jobId);
+    const ipc = getIpc();
+    if (ipc) {
+      await ipc.invoke('finish-conversion-job', jobId);
     }
   }
 
@@ -241,8 +259,9 @@ export class AppBridge {
         if (unlistenFn) unlistenFn();
       };
     }
-    if (isElectron()) {
-      return window.ipc.on<ProgressPayload>('conversion-progress', (arg) => {
+    const ipc = getIpc();
+    if (ipc) {
+      return ipc.on<ProgressPayload>('conversion-progress', (arg: ProgressPayload) => {
         if (arg) callback(arg);
       });
     }
@@ -256,8 +275,9 @@ export class AppBridge {
       }).catch(() => {});
       return;
     }
-    if (isElectron()) {
-      window.ipc.send('log-debug', msg);
+    const ipc = getIpc();
+    if (ipc) {
+      ipc.send('log-debug', msg);
     }
   }
 }

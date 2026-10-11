@@ -75,4 +75,4 @@
   - `AudioConverterContext.tsx` および `home.tsx` の全 `window.ipc` 呼び出しを `AppBridge` に完全置換
 - [x] **ビルド・パッケージング検証**
   - Next.js の静的エクスポート（`next build renderer`）と `tauri build` の自動連携検証完了
-- [ ] **Electron 関連依存（`electron`, `electron-builder`, `nextron` 等）の完全削除**
+- [x] **Electron 関連依存（`electron`, `electron-builder`, `nextron` 等）の完全削除（アプリ容量 150MB+ → 約 16MB への軽量化達成）**

@@ -118,10 +118,15 @@ export interface JobTab {
   selectedFileId: string | null;
 }
 
-import type { IpcHandler } from '../main/preload';
+export interface ElectronIpcFallback {
+  invoke: <T = any>(channel: string, ...args: any[]) => Promise<T>;
+  send: (channel: string, ...args: any[]) => void;
+  on: <T = any>(channel: string, callback: (arg: T) => void) => () => void;
+  getPathForFile?: (file: File) => string;
+}
 
 declare global {
   interface Window {
-    ipc: IpcHandler;
+    ipc?: ElectronIpcFallback;
   }
 }
