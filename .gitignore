@@ -20,3 +20,6 @@ output_test.*
 for_test/
 
 .DS_Store
+
+# Local-only material. Never commit.
+/private/
