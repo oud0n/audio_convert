@@ -884,3 +884,37 @@ fn verification_and_preview_decoding_stop_when_cancelled() {
     assert_eq!(err.to_string(), crate::audio::audit::CANCELLED);
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
+
+#[test]
+fn uncompressed_flac_writes_uncommon_rates_into_the_frame_header() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    for rate in [11025u32, 352800, 12000] {
+        let src = d.0.join(format!("r{rate}.wav"));
+        ffmpeg(&["-f", "lavfi", "-i", &format!("sine=frequency=500:sample_rate={rate}:duration=0.2"), "-c:a", "pcm_s24le", src.to_str().unwrap()]);
+        let mut req = request(&src, &d.0.join("out"), "FLAC", &format!("r{rate}"));
+        req.settings.flac_uncompressed = Some(true);
+        let path = convert_blocking_ex(&ctx(), &req).unwrap().path;
+        let bytes = fs::read(&path).unwrap();
+        let audio = {
+            let mut pos = 4;
+            loop {
+                let last = bytes[pos] & 0x80 != 0;
+                pos += 4 + u32::from_be_bytes([0, bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
+                if last {
+                    break pos;
+                }
+            }
+        };
+        assert_ne!(bytes[audio + 2] & 0x0f, 0, "{rate}: frame header must carry the rate");
+        assert!(flac_verbatim::first_frame_is_verbatim(&path).unwrap(), "{rate}");
+        assert_eq!(probe_source(&get_ffmpeg_executable(), &path).unwrap().sample_rate, Some(rate));
+        assert_eq!(
+            compute_pcm_fingerprint(path.to_str().unwrap()).unwrap().0,
+            compute_pcm_fingerprint(src.to_str().unwrap()).unwrap().0,
+            "{rate}: bit-exact"
+        );
+    }
+}

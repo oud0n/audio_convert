@@ -501,6 +501,8 @@ export default function HomeDashboardPage() {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
+    // In Tauri the window-level drop listener below adds the files (with folders expanded).
+    if (isTauri()) return;
     if (e.dataTransfer) {
       const droppedFiles = await scanFiles(e.dataTransfer);
       if (droppedFiles.length > 0) {

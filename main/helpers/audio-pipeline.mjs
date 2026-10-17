@@ -242,7 +242,8 @@ export async function convertAudio(executable, request, source, options = {}) {
     await fs.copyFile(tempOutput, staging, fs.constants.COPYFILE_EXCL);
     const base = name.slice(0, -ext.length - 1);
     for (let i = 0; i < 10000; i++) {
-      const destination = path.join(targetDir, i ? `${base} (${i}).${ext}` : name);
+      // name.ext, then name_2.ext, name_3.ext, ...
+      const destination = path.join(targetDir, i ? `${base}_${i + 1}.${ext}` : name);
       try {
         checkCancelled(signal);
         await publishOutput(staging, destination, signal);

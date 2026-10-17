@@ -26,20 +26,24 @@ struct Block {
     data: Vec<u8>,
 }
 
-fn read_blocks(bytes: &[u8]) -> Result<(Vec<Block>, usize), String> {
-    if bytes.len() < 4 || &bytes[..4] != b"fLaC" {
+/// Reads the metadata blocks only (not the audio). Returns them and the audio offset.
+fn read_blocks(r: &mut impl Read) -> Result<(Vec<Block>, usize), String> {
+    let mut magic = [0u8; 4];
+    r.read_exact(&mut magic).map_err(|_| "not a FLAC file")?;
+    if &magic != b"fLaC" {
         return Err("not a FLAC file".into());
     }
     let mut pos = 4;
     let mut blocks = Vec::new();
     loop {
-        let header = bytes.get(pos..pos + 4).ok_or("truncated FLAC metadata")?;
+        let mut header = [0u8; 4];
+        r.read_exact(&mut header).map_err(|_| "truncated FLAC metadata")?;
         let last = header[0] & 0x80 != 0;
         let kind = header[0] & 0x7f;
         let len = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
-        pos += 4;
-        let data = bytes.get(pos..pos + len).ok_or("truncated FLAC metadata block")?.to_vec();
-        pos += len;
+        let mut data = vec![0u8; len];
+        r.read_exact(&mut data).map_err(|_| "truncated FLAC metadata block")?;
+        pos += 4 + len;
         blocks.push(Block { kind, data });
         if last {
             return Ok((blocks, pos));
@@ -131,8 +135,11 @@ fn utf8_number(v: u64, w: &mut BitWriter) {
     }
 }
 
-fn rate_code(rate: u32) -> u64 {
-    match rate {
+/// Frame header sample rate: the 4-bit code, and the value written after the block
+/// size for rates without a code of their own (the streamable subset never refers to
+/// STREAMINFO for the rate).
+fn rate_code(rate: u32) -> (u64, Option<(u64, u32)>) {
+    let code = match rate {
         88200 => 0b0001,
         176400 => 0b0010,
         192000 => 0b0011,
@@ -144,8 +151,12 @@ fn rate_code(rate: u32) -> u64 {
         44100 => 0b1001,
         48000 => 0b1010,
         96000 => 0b1011,
-        _ => 0b0000, // from STREAMINFO
-    }
+        _ if rate % 1000 == 0 && rate / 1000 <= 255 => return (0b1100, Some(((rate / 1000) as u64, 8))),
+        _ if rate <= 65535 => return (0b1101, Some((rate as u64, 16))),
+        _ if rate % 10 == 0 && rate / 10 <= 65535 => return (0b1110, Some(((rate / 10) as u64, 16))),
+        _ => 0b0000, // only STREAMINFO can hold it
+    };
+    (code, None)
 }
 
 fn bits_code(bits: u32) -> u64 {
@@ -167,12 +178,16 @@ fn write_frame(info: &StreamInfo, number: u64, samples: &[i32], n: usize) -> Vec
     w.put(0, 1); // reserved
     w.put(0, 1); // fixed block size
     w.put(0b0111, 4); // block size: 16 bits at the end of the header
-    w.put(rate_code(info.sample_rate), 4);
+    let (rate, rate_extra) = rate_code(info.sample_rate);
+    w.put(rate, 4);
     w.put((info.channels - 1) as u64, 4); // independent channels
     w.put(bits_code(info.bits), 3);
     w.put(0, 1); // reserved
     utf8_number(number, &mut w);
     w.put((n - 1) as u64, 16);
+    if let Some((value, bits)) = rate_extra {
+        w.put(value, bits);
+    }
     let crc = crc8(&w.out);
     w.put(crc as u64, 8);
     let ch = info.channels as usize;
@@ -192,8 +207,7 @@ fn write_frame(info: &StreamInfo, number: u64, samples: &[i32], n: usize) -> Vec
 /// signed 32-bit little-endian interleaved audio of the same file (each sample's value
 /// in the top bits, as FFmpeg's decoder outputs it).
 pub fn rewrite_verbatim(flac: &Path, pcm: &Path) -> Result<(), String> {
-    let bytes = fs::read(flac).map_err(|e| e.to_string())?;
-    let (blocks, _) = read_blocks(&bytes)?;
+    let (blocks, _) = read_blocks(&mut BufReader::new(File::open(flac).map_err(|e| e.to_string())?))?;
     let stream = blocks.first().filter(|b| b.kind == 0).ok_or("FLAC has no STREAMINFO")?;
     let info = parse_stream_info(&stream.data)?;
     if !(4..=32).contains(&info.bits) || info.channels == 0 {
@@ -286,7 +300,7 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 #[cfg(test)]
 pub fn first_frame_is_verbatim(flac: &Path) -> Result<bool, String> {
     let bytes = fs::read(flac).map_err(|e| e.to_string())?;
-    let (blocks, audio) = read_blocks(&bytes)?;
+    let (blocks, audio) = read_blocks(&mut &bytes[..])?;
     let info = parse_stream_info(&blocks[0].data)?;
     let frame = &bytes[audio..];
     // Header: 4 fixed bytes, the coded frame number, optional block size / rate bytes, CRC-8.
@@ -294,21 +308,17 @@ pub fn first_frame_is_verbatim(flac: &Path) -> Result<bool, String> {
     let lead = *frame.get(pos).ok_or("no frame")?;
     pos += (lead.leading_ones() as usize).max(1);
     let bs_code = frame[2] >> 4;
-    pos += match bs_code {
-        6 => 1,
-        7 => 2,
-        _ => 0,
-    };
+    if bs_code != 7 {
+        return Ok(false);
+    }
+    let n = u16::from_be_bytes([frame[pos], frame[pos + 1]]) as usize + 1;
+    pos += 2;
     pos += match frame[2] & 0x0f {
         12 => 1,
         13 | 14 => 2,
         _ => 0,
     };
     pos += 1; // CRC-8
-    let n = match bs_code {
-        7 => u16::from_be_bytes([frame[pos - 3], frame[pos - 2]]) as usize + 1,
-        _ => return Ok(false),
-    };
     for _ in 0..info.channels {
         if frame.get(pos) != Some(&0b0000_0010) || info.bits % 8 != 0 {
             return Ok(false);

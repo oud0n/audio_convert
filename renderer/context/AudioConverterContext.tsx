@@ -623,7 +623,17 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     showToast('info', analyzingMsg);
     addLogToTab(targetTabId, startedMsg, 'info');
 
-    const results = await Promise.all(arr.map(f => processAndDecodeFile(f, targetTabId)));
+    // Decode a few files at a time: a dropped folder can hold thousands, and each decode
+    // runs FFmpeg and holds the decoded audio in memory.
+    const results: Array<{ success: boolean; fileRecord?: AudioFile; error?: string }> = new Array(arr.length);
+    let next = 0;
+    const worker = async () => {
+      while (next < arr.length) {
+        const i = next++;
+        results[i] = await processAndDecodeFile(arr[i], targetTabId);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, arr.length) }, worker));
 
     const succeededFiles: AudioFile[] = [];
     const skippedFiles: Array<{ name: string; reason: string }> = [];
@@ -641,17 +651,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     });
 
     if (succeededFiles.length > 0) {
-      // Use the target tab's settings as they are now (they may have changed while decoding,
-      // or the files may have been read with another tab's settings).
+      // Output format from the target tab's settings as they are now (they may have
+      // changed while decoding). Rate, channels and bitrate stay the source's.
       setTabs(prev => prev.map(t => t.id === targetTabId ? {
         ...t,
-        files: [...t.files, ...succeededFiles.map(f => ({
-          ...f,
-          outputFormat: t.settings.outputFormat,
-          bitrate: t.settings.bitrate,
-          sampleRate: t.settings.sampleRate,
-          channels: t.settings.channels,
-        }))]
+        files: [...t.files, ...succeededFiles.map(f => ({ ...f, outputFormat: t.settings.outputFormat }))]
       } : t));
       
       const successLog = lang === 'ja' ? `${succeededFiles.length}個のファイルをインポートしました。` : `Imported ${succeededFiles.length} files.`;

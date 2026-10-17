@@ -326,6 +326,9 @@ pub fn verify_quality_blocking(
 
     // 1. Bit-exact SHA-256 Fingerprint check
     let orig_hash = compute_pcm_fingerprint_cancellable(&original_path, cancelled);
+    if cancelled() {
+        return failure(CANCELLED.into());
+    }
     let conv_hash = compute_pcm_fingerprint_cancellable(&converted_path, cancelled);
     if cancelled() {
         return failure(CANCELLED.into());
@@ -372,7 +375,7 @@ pub fn verify_quality_blocking(
             return VerifyQualityResponse {
                 success: false,
                 result: None,
-                error: Some(format!("Failed to decode original: {}", e)),
+                error: Some(if cancelled() { CANCELLED.to_string() } else { format!("Failed to decode original: {}", e) }),
             }
         }
     };
@@ -384,7 +387,7 @@ pub fn verify_quality_blocking(
             return VerifyQualityResponse {
                 success: false,
                 result: None,
-                error: Some(format!("Failed to decode converted: {}", e)),
+                error: Some(if cancelled() { CANCELLED.to_string() } else { format!("Failed to decode converted: {}", e) }),
             }
         }
     };

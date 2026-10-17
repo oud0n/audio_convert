@@ -91,7 +91,7 @@ test('24-bit preservation, low-bit detection, settings, collisions, failure clea
     assert.deepEqual(await pcmFingerprint(executable, result.path), original);
     assert.notEqual((await pcmFingerprint(executable, altered)).hash, original.hash);
     const collision = await convertAudio(executable, request, source);
-    assert.equal(collision.fileName, '고백_ 꽃 (1).flac');
+    assert.equal(collision.fileName, '고백_ 꽃_2.flac');
     const wav = await convertAudio(executable, { ...request, fileName: 'preserved.wav', outputFormat: 'WAV' }, source);
     assert.equal((await parseFile(wav.path)).format.bitsPerSample, 24);
     assert.deepEqual(await pcmFingerprint(executable, wav.path), original);
@@ -195,7 +195,7 @@ test('FAT/exFAT publication fallback refuses collisions', async t => {
     const first = await convertAudio(executable, request, source);
     const original = await fs.readFile(first.path);
     const second = await convertAudio(executable, request, source);
-    assert.equal(second.fileName, 'copy (1).wav');
+    assert.equal(second.fileName, 'copy_2.wav');
     assert.deepEqual(await fs.readFile(first.path), original);
     assert.deepEqual(await pcmFingerprint(executable, second.path), await pcmFingerprint(executable, input));
   } finally { fs.link = originalLink; await fs.rm(dir, { recursive: true, force: true }); }
