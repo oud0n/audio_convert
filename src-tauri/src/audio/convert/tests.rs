@@ -804,12 +804,7 @@ fn verification_compares_resampled_output_at_its_own_rate() {
     let mut req = request(&src, &d.0.join("out"), "FLAC", "capped");
     req.settings.max_sample_rate = Some(96000);
     let (out, _) = convert_blocking(&ctx(), &req).unwrap();
-    let res = tauri::async_runtime::block_on(crate::audio::audit::verify_audio_quality(
-        src.to_string_lossy().into_owned(),
-        out.to_string_lossy().into_owned(),
-        false,
-        None,
-    ));
+    let res = crate::audio::audit::verify_quality_blocking(&src.to_string_lossy(), &out.to_string_lossy(), false, &|| false);
     let r = res.result.expect("verification result");
     assert!(r.correlation_percent.unwrap_or(0.0) > 99.0, "correlation {:?} status {}", r.correlation_percent, r.status);
     assert_ne!(r.status, "degraded");
@@ -860,4 +855,32 @@ fn uncompressed_flac_is_verbatim_bit_exact_and_keeps_tags_and_cover() {
         }
         fs::remove_dir_all(d.0.join("out")).unwrap();
     }
+}
+
+#[test]
+fn verification_and_preview_decoding_stop_when_cancelled() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let long = d.0.join("long.flac");
+    ffmpeg(&["-f", "lavfi", "-i", "anoisesrc=d=600:r=96000", "-c:a", "flac", "-compression_level", "0", long.to_str().unwrap()]);
+    let path = long.to_string_lossy().into_owned();
+
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let started = std::time::Instant::now();
+    let is_cancelled = || cancel.load(std::sync::atomic::Ordering::SeqCst);
+    let res = crate::audio::audit::verify_quality_blocking(&path, &path, true, &is_cancelled);
+    assert_eq!(res.error.as_deref(), Some(crate::audio::audit::CANCELLED), "{:?}", res.result.map(|r| r.status));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+
+    let started = std::time::Instant::now();
+    let err = crate::audio::audit::decode_to_temp_wav(&path, None, &|| started.elapsed() > std::time::Duration::from_millis(100)).unwrap_err();
+    assert_eq!(err.to_string(), crate::audio::audit::CANCELLED);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }

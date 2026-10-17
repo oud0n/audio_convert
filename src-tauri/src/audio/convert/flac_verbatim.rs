@@ -282,8 +282,8 @@ fn read_full(r: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(got)
 }
 
-/// Counts the subframe types in a FLAC file's first frame (for tests and checks):
-/// returns true if every subframe of the first frame is VERBATIM.
+/// True if every subframe of the file's first frame is VERBATIM (used by the tests).
+#[cfg(test)]
 pub fn first_frame_is_verbatim(flac: &Path) -> Result<bool, String> {
     let bytes = fs::read(flac).map_err(|e| e.to_string())?;
     let (blocks, audio) = read_blocks(&bytes)?;

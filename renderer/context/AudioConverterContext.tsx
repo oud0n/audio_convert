@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
 import { analyzeAudioBuffer } from '../utils/audioEncoder';
-import { AppBridge } from '../services/bridge';
+import { AppBridge, isPathOnlyFile, type PathOnlyFile } from '../services/bridge';
 import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS } from '../utils/fileNamePattern';
 
 interface AudioConverterContextType {
@@ -408,8 +408,12 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     return new Promise((resolve) => {
       const id = Math.random().toString(36).substring(2, 11);
       const ext = f.name.lastIndexOf('.') > 0 ? f.name.substring(f.name.lastIndexOf('.') + 1).toLowerCase() : '';
+      // Files dropped on the Tauri window arrive as a path only (an empty File): skip the
+      // browser decode and let FFmpeg read the file. Their real size comes with them.
+      const pathOnly = isPathOnlyFile(f);
+      const fileSize = pathOnly ? (f as PathOnlyFile).nativeSize : f.size;
 
-      addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 解析開始 (サイズ: ${f.size} bytes, 拡張子: ${ext})`, 'info');
+      addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 解析開始 (サイズ: ${fileSize} bytes, 拡張子: ${ext})`, 'info');
 
       const reader = new FileReader();
       reader.onload = async (e) => {
@@ -429,7 +433,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           
           addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザネイティブ(AudioContext.decodeAudioData)デコード開始...`, 'info');
           
-          audioCtx.decodeAudioData(
+          const decodeInBrowser = (data: ArrayBuffer, ok: (b: AudioBuffer) => void, fail: (err: any) => void) =>
+            pathOnly ? fail({ message: 'path only', pathOnly: true }) : audioCtx.decodeAudioData(data, ok, fail);
+          decodeInBrowser(
             e.target.result as ArrayBuffer,
             (buffer) => {
               addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコードに成功しました。再生時間: ${buffer.duration.toFixed(2)}秒`, 'success');
@@ -452,7 +458,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                   id,
                   name: f.name,
                   path: filePath,
-                  size: f.size,
+                  size: fileSize,
                   duration: nativeDuration,
                   originalFormat: ext,
                   outputFormat: settings.outputFormat,
@@ -494,7 +500,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               }
             },
             (err) => {
-              addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコード失敗: ${err?.message || '不明なデコードエラー'}。フォールバック処理を起動します。`, 'error');
+              if (err?.pathOnly) {
+                addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ドロップされたファイルを FFmpeg でデコードします。`, 'info');
+              } else {
+                addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザデコード失敗: ${err?.message || '不明なデコードエラー'}。フォールバック処理を起動します。`, 'error');
+              }
               
               const resolveFilePath = (fileObj: File): string => AppBridge.getPathForFile(fileObj);
 
@@ -545,7 +555,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                             id,
                             name: f.name,
                             path: filePath,
-                            size: f.size,
+                            size: fileSize,
                             duration: nativeDuration,
                             originalFormat: ext,
                             outputFormat: settings.outputFormat,
@@ -631,9 +641,17 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     });
 
     if (succeededFiles.length > 0) {
+      // Use the target tab's settings as they are now (they may have changed while decoding,
+      // or the files may have been read with another tab's settings).
       setTabs(prev => prev.map(t => t.id === targetTabId ? {
         ...t,
-        files: [...t.files, ...succeededFiles]
+        files: [...t.files, ...succeededFiles.map(f => ({
+          ...f,
+          outputFormat: t.settings.outputFormat,
+          bitrate: t.settings.bitrate,
+          sampleRate: t.settings.sampleRate,
+          channels: t.settings.channels,
+        }))]
       } : t));
       
       const successLog = lang === 'ja' ? `${succeededFiles.length}個のファイルをインポートしました。` : `Imported ${succeededFiles.length} files.`;
@@ -816,6 +834,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             wavBlob = new Blob([preview], { type: 'audio/wav' });
             convertedUrl = URL.createObjectURL(wavBlob);
           } catch (previewError) {
+            if (job.cancelled) throw previewError;
             addLogToTab(tabId, `Output saved; preview unavailable: ${String(previewError)}`, 'info');
           }
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ディスク保存完了: "${savedPath}"` : `[${fileRecord.name}] Saved successfully to: "${savedPath}"`, 'success');

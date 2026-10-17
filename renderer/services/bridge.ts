@@ -42,6 +42,25 @@ export interface VerificationResponse {
   error?: string;
 }
 
+/** A file known only by its path (dropped on the Tauri window): the File itself is empty. */
+export type PathOnlyFile = File & { path: string; nativeSize: number; pathOnly: true };
+
+export function isPathOnlyFile(f: File): f is PathOnlyFile {
+  return (f as any).pathOnly === true && typeof (f as any).path === 'string';
+}
+
+export function pathOnlyFile(path: string, name: string, size: number): PathOnlyFile {
+  const file = new File([], name) as PathOnlyFile;
+  Object.assign(file, { path, nativeSize: size, pathOnly: true });
+  return file;
+}
+
+export interface DroppedFile {
+  path: string;
+  name: string;
+  size: number;
+}
+
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 }
@@ -133,6 +152,15 @@ export class AppBridge {
       return await invoke<ConvertResult>('move_output_into_place', { from, to });
     }
     return { success: false, error: 'Not supported in this runtime' };
+  }
+
+  /** Expands dropped paths (folders recursively) to the files with one of `extensions`. */
+  static async expandDroppedPaths(paths: string[], extensions: string[]): Promise<DroppedFile[]> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<DroppedFile[]>('expand_dropped_paths', { paths, extensions });
+    }
+    return [];
   }
 
   static async readOutputPreview(filePath: string, jobId?: string): Promise<ArrayBuffer> {

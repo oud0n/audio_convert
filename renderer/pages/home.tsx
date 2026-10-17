@@ -14,7 +14,7 @@ import {
 import { estimateOutputSize } from '../utils/audioEncoder';
 import { MetadataTags, getFormatExtension } from '../types';
 import { t } from '../utils/i18n';
-import { AppBridge, isTauri } from '../services/bridge';
+import { AppBridge, isTauri, pathOnlyFile } from '../services/bridge';
 import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS } from '../utils/fileNamePattern';
 
 export default function HomeDashboardPage() {
@@ -519,19 +519,15 @@ export default function HomeDashboardPage() {
     import('@tauri-apps/api/webviewWindow')
       .then(({ getCurrentWebviewWindow }) => getCurrentWebviewWindow().onDragDropEvent((event) => {
         if (event.payload.type !== 'drop') return;
-        const fileObjects: File[] = [];
-        for (const p of event.payload.paths || []) {
-          const name = p.replace(/^.*[\\/]/, '');
-          const dot = name.lastIndexOf('.');
-          // Folders (no extension) are not expanded here.
-          if (dot <= 0) continue;
-          const ext = name.slice(dot + 1).toLowerCase();
-          if (!SUPPORTED_INPUT_EXTENSIONS.includes(ext)) continue;
-          const file = new File([], name);
-          (file as any).path = p;
-          fileObjects.push(file);
-        }
-        if (fileObjects.length > 0) handleAddFilesRef.current(fileObjects);
+        const paths = event.payload.paths || [];
+        if (paths.length === 0) return;
+        // Folders are expanded (recursively) by the backend, which also reports sizes.
+        AppBridge.expandDroppedPaths(paths, SUPPORTED_INPUT_EXTENSIONS)
+          .then((found) => {
+            const fileObjects = found.map(f => pathOnlyFile(f.path, f.name, f.size));
+            if (fileObjects.length > 0) handleAddFilesRef.current(fileObjects);
+          })
+          .catch((err) => console.warn('Cannot read dropped paths:', err));
       }))
       .then((fn) => {
         if (disposed) fn();

@@ -37,6 +37,7 @@ pub fn run() {
             system::settings::load_settings,
             system::settings::save_settings,
             system::commands::trash_file,
+            system::commands::expand_dropped_paths,
             system::commands::get_default_save_path,
             system::commands::log_debug,
         ])

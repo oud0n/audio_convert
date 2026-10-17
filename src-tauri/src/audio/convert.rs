@@ -1558,8 +1558,12 @@ pub async fn finish_conversion_job(state: tauri::State<'_, ActiveJobs>, job_id: 
 
 #[tauri::command]
 pub async fn decode_audio_to_wav(file_path: String) -> Result<Vec<u8>, String> {
+    decode_wav_cancellable(file_path, Box::new(|| false)).await
+}
+
+async fn decode_wav_cancellable(file_path: String, cancelled: Box<dyn Fn() -> bool + Send>) -> Result<Vec<u8>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let temp = decode_to_temp_wav(&file_path, None).map_err(|e| e.to_string())?;
+        let temp = decode_to_temp_wav(&file_path, None, &*cancelled).map_err(|e| e.to_string())?;
         let data = fs::read(&temp).map_err(|e| e.to_string());
         let _ = fs::remove_file(&temp);
         data
@@ -1568,9 +1572,21 @@ pub async fn decode_audio_to_wav(file_path: String) -> Result<Vec<u8>, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Decodes the saved output for the preview player; stops when the job is cancelled.
 #[tauri::command]
-pub async fn read_output_preview(file_path: String, _job_id: Option<String>) -> Result<Vec<u8>, String> {
-    decode_audio_to_wav(file_path).await
+pub async fn read_output_preview(app: AppHandle, file_path: String, job_id: Option<String>) -> Result<Vec<u8>, String> {
+    use tauri::Manager;
+    let jobs = app.state::<ActiveJobs>().inner().clone();
+    decode_wav_cancellable(file_path, Box::new(job_cancelled_fn(jobs, job_id))).await
+}
+
+/// "Has this job been cancelled?" for work outside the conversion itself. A cancel
+/// removes the job from the map; no job id means the work cannot be cancelled.
+pub fn job_cancelled_fn(jobs: ActiveJobs, job_id: Option<String>) -> impl Fn() -> bool + Send + 'static {
+    move || match &job_id {
+        Some(id) => jobs.lock().map(|j| !j.contains_key(id)).unwrap_or(true),
+        None => false,
+    }
 }
 
 #[tauri::command]

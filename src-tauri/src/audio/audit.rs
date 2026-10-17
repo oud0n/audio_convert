@@ -62,9 +62,31 @@ pub fn get_ffmpeg_executable() -> PathBuf {
     PathBuf::from("ffmpeg")
 }
 
+/// Error text used when a job was cancelled while FFmpeg ran.
+pub const CANCELLED: &str = "Cancelled";
+
+/// Waits for `child`, killing it as soon as `cancelled()` returns true.
+pub fn wait_or_kill(
+    child: &mut std::process::Child,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<std::process::ExitStatus, Box<dyn std::error::Error + Send + Sync>> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CANCELLED.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 pub fn decode_to_temp_wav(
     file_path: &str,
     sample_rate: Option<u32>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let tmp_dir = std::env::temp_dir();
     let temp_name = format!(
@@ -86,11 +108,11 @@ pub fn decode_to_temp_wav(
     cmd.arg(&output_path);
 
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    let status = match cmd.status() {
+    let status = match cmd.spawn().map_err(|e| e.into()).and_then(|mut child| wait_or_kill(&mut child, cancelled)) {
         Ok(status) => status,
         Err(e) => {
             let _ = std::fs::remove_file(&output_path);
-            return Err(e.into());
+            return Err(e);
         }
     };
     if !status.success() {
@@ -103,6 +125,13 @@ pub fn decode_to_temp_wav(
 
 pub fn compute_pcm_fingerprint(
     file_path: &str,
+) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
+    compute_pcm_fingerprint_cancellable(file_path, &|| false)
+}
+
+pub fn compute_pcm_fingerprint_cancellable(
+    file_path: &str,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
     let ffmpeg = get_ffmpeg_executable();
     let mut child = crate::audio::convert::hidden_command(&ffmpeg)
@@ -128,6 +157,11 @@ pub fn compute_pcm_fingerprint(
     let mut total_bytes = 0;
 
     loop {
+        if cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CANCELLED.into());
+        }
         let read_bytes = stdout.read(&mut buffer)?;
         if read_bytes == 0 {
             break;
@@ -249,13 +283,37 @@ fn compare_pcm_samples(pcm1: &[i16], pcm2: &[i16]) -> Result<DiffMetrics, Box<dy
     })
 }
 
+/// Verifies a conversion. With a job id, it stops (and FFmpeg is killed) when that job
+/// is cancelled; without one (a manual re-check), it runs to the end.
 #[tauri::command]
 pub async fn verify_audio_quality(
+    app: tauri::AppHandle,
     original_path: String,
     converted_path: String,
     is_lossless_pair: bool,
-    _job_id: Option<String>,
+    job_id: Option<String>,
 ) -> VerifyQualityResponse {
+    use tauri::Manager;
+    let jobs = app.state::<crate::audio::convert::ActiveJobs>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let cancelled = crate::audio::convert::job_cancelled_fn(jobs, job_id);
+        verify_quality_blocking(&original_path, &converted_path, is_lossless_pair, &cancelled)
+    })
+    .await
+    .unwrap_or_else(|e| VerifyQualityResponse { success: false, result: None, error: Some(e.to_string()) })
+}
+
+fn failure(error: String) -> VerifyQualityResponse {
+    VerifyQualityResponse { success: false, result: None, error: Some(error) }
+}
+
+pub fn verify_quality_blocking(
+    original_path: &str,
+    converted_path: &str,
+    is_lossless_pair: bool,
+    cancelled: &dyn Fn() -> bool,
+) -> VerifyQualityResponse {
+    let (original_path, converted_path) = (original_path.to_string(), converted_path.to_string());
     let now = chrono::Local::now().format("%H:%M:%S").to_string();
 
     if !Path::new(&original_path).exists() || !Path::new(&converted_path).exists() {
@@ -267,8 +325,11 @@ pub async fn verify_audio_quality(
     }
 
     // 1. Bit-exact SHA-256 Fingerprint check
-    let orig_hash = compute_pcm_fingerprint(&original_path);
-    let conv_hash = compute_pcm_fingerprint(&converted_path);
+    let orig_hash = compute_pcm_fingerprint_cancellable(&original_path, cancelled);
+    let conv_hash = compute_pcm_fingerprint_cancellable(&converted_path, cancelled);
+    if cancelled() {
+        return failure(CANCELLED.into());
+    }
 
     if let (Ok((hash1, bytes1)), Ok((hash2, bytes2))) = (&orig_hash, &conv_hash) {
         if hash1 == hash2 && bytes1 == bytes2 {
@@ -305,7 +366,7 @@ pub async fn verify_audio_quality(
     let converted_rate = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(&converted_path))
         .ok()
         .and_then(|info| info.sample_rate);
-    let temp_orig = match decode_to_temp_wav(&original_path, converted_rate) {
+    let temp_orig = match decode_to_temp_wav(&original_path, converted_rate, cancelled) {
         Ok(p) => p,
         Err(e) => {
             return VerifyQualityResponse {
@@ -316,7 +377,7 @@ pub async fn verify_audio_quality(
         }
     };
 
-    let temp_conv = match decode_to_temp_wav(&converted_path, None) {
+    let temp_conv = match decode_to_temp_wav(&converted_path, None, cancelled) {
         Ok(p) => p,
         Err(e) => {
             let _ = std::fs::remove_file(&temp_orig);
