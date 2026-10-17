@@ -65,6 +65,9 @@ const defaultSettings: ConverterSettings = {
   renameByTags: true,
   renamePattern: DEFAULT_RENAME_PATTERN,
   localSavePath: '~/Music/Audio-Convert-Outputs',
+  maxSampleRate: 0,
+  flacCompressionLevel: 5,
+  onExisting: 'rename',
 };
 
 export const AudioConverterProvider = ({ children }: { children: React.ReactNode }) => {
@@ -454,6 +457,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                   outputFormat: settings.outputFormat,
                   bitrate: nativeBitrate,
                   sampleRate: nativeSampleRate,
+                  sourceSampleRate: nativeSampleRate,
                   channels: nativeChannels,
                   status: 'queued',
                   progress: 0,
@@ -546,6 +550,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                             outputFormat: settings.outputFormat,
                             bitrate: nativeBitrate,
                             sampleRate: nativeSampleRate,
+                            sourceSampleRate: nativeSampleRate,
                             channels: nativeChannels,
                             status: 'queued',
                             progress: 0,
@@ -754,6 +759,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       let convertedUrl: string | null = null;
       let wavBlob: Blob | null = null;
       let savedOutputPath = '';
+      // Set when "overwrite" hit the source file itself: the output got a new name and
+      // takes the source's name once the source is in the trash.
+      let replacesPath = '';
 
       const targetExt = getFormatExtension(fileRecord.outputFormat);
       const outputStem = tabSettings.renameByTags && fileRecord.tags
@@ -775,10 +783,24 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           tags: editedTags(fileRecord.tags, fileRecord.sourceTags),
         });
 
+        if (saveResult?.success && saveResult.skipped && saveResult.path) {
+          // An existing output was kept. It is not ours: do not verify it and never
+          // delete the original because of it.
+          batchRef.current.success++;
+          addLogToTab(tabId, lang === 'ja'
+            ? `[${fileRecord.name}] 出力先に同名のファイルがあるためスキップしました: "${saveResult.path}"`
+            : `[${fileRecord.name}] Skipped: the output file already exists: "${saveResult.path}"`, 'info');
+          setTabs(prev => prev.map(t => t.id === tabId ? {
+            ...t,
+            files: t.files.map(f => f.id === id ? { ...f, status: 'completed', progress: 100, outputPath: saveResult.path, outputFileName: saveResult.fileName } : f),
+          } : t));
+          return;
+        }
         if (saveResult?.success && saveResult.path) {
           // Record the saved file before any cancel check can throw.
           publishedPath = saveResult.path;
           publishedName = saveResult.fileName || finalExportName;
+          replacesPath = saveResult.replacesPath || '';
           setTabs(prev => prev.map(tab => tab.id === tabId ? { ...tab, files: tab.files.map(file => file.id === id ? { ...file, outputPath: saveResult.path, outputFileName: saveResult.fileName } : file) } : tab));
         }
         checkActive();
@@ -804,7 +826,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           checkActive();
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] データ欠損・品質劣化チェックを実行中...` : `[${fileRecord.name}] Verifying quality and data loss...`, 'info');
           // Bit-exact comparison only makes sense when the audio was not changed on purpose.
-          const isLosslessPair = tabSettings.sameAsSource &&
+          const capped = !!tabSettings.maxSampleRate && (fileRecord.sourceSampleRate ?? fileRecord.sampleRate) > tabSettings.maxSampleRate;
+          const isLosslessPair = tabSettings.sameAsSource && !capped &&
                                 isLosslessSource(fileRecord.sourceLossless, fileRecord.name) &&
                                 LOSSLESS_OUTPUT_FORMATS.includes(fileRecord.outputFormat.toUpperCase());
           try {
@@ -844,6 +867,18 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動しました。` : `[${fileRecord.name}] Moved original file to trash.`, 'success');
           originalDeleted = true;
           trashedOriginal = true;
+          if (replacesPath) {
+            const moved = await AppBridge.moveOutputIntoPlace(savedOutputPath, replacesPath);
+            if (moved?.success && moved.path) {
+              savedOutputPath = moved.path;
+              publishedPath = moved.path;
+              publishedName = moved.fileName || publishedName;
+              addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 出力を元のファイル名に変更しました: "${moved.path}"` : `[${fileRecord.name}] Renamed the output to the original name: "${moved.path}"`, 'success');
+            } else {
+              batchRef.current.warnings++;
+              addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 出力を元のファイル名に変更できませんでした: ${moved?.error}` : `[${fileRecord.name}] Could not rename the output to the original name: ${moved?.error}`, 'error');
+            }
+          }
         } else {
           batchRef.current.warnings++;
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルのゴミ箱への移動に失敗しました: ${trashResult.error}` : `[${fileRecord.name}] Failed to move original file to trash: ${trashResult.error}`, 'error');
@@ -859,7 +894,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             ...t,
             files: t.files.map(f => f.id === id ? {
               ...f,
-              outputFileName: finalExportName,
+              outputFileName: publishedName || finalExportName,
               outputPath: savedOutputPath,
               status: 'completed',
               progress: 100,
@@ -930,7 +965,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     }
 
     addLogToTab(targetTabId, lang === 'ja' ? `[${file.name}] 再検証を実行中...` : `[${file.name}] Re-running quality verification...`, 'info');
-    const isLosslessPair = (tab.settings.sameAsSource ?? true) &&
+    const capped = !!tab.settings.maxSampleRate && (file.sourceSampleRate ?? file.sampleRate) > tab.settings.maxSampleRate;
+    const isLosslessPair = (tab.settings.sameAsSource ?? true) && !capped &&
                           isLosslessSource(file.sourceLossless, file.name) &&
                           LOSSLESS_OUTPUT_FORMATS.includes(file.outputFormat.toUpperCase());
 

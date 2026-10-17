@@ -17,6 +17,9 @@ fn settings(keep: bool) -> ConverterSettings {
         same_as_source: Some(keep),
         save_in_source_folder: Some(false),
         local_save_path: None,
+        max_sample_rate: None,
+        flac_compression_level: None,
+        on_existing: None,
     }
 }
 
@@ -158,7 +161,7 @@ fn lossy_outputs_get_rates_channels_and_bitrates_the_encoder_accepts() {
     let mp3 = build_encode_args(OutFormat::Mp3, i, o, &settings(true), &hi, &no_tags(), None).unwrap();
     assert_eq!(arg_after(&mp3.args, "-ar"), Some("48000"));
     assert_eq!(arg_after(&mp3.args, "-ac"), None, "channels are changed by a filter, never -ac");
-    assert_eq!(arg_after(&mp3.args, "-af"), Some("aformat=sample_rates=48000:channel_layouts=stereo"));
+    assert_eq!(arg_after(&mp3.args, "-af"), Some("aresample=48000:filter_size=64:phase_shift=10:cutoff=0.97,aformat=channel_layouts=stereo"));
     assert_eq!(arg_after(&mp3.args, "-b:a"), Some("192k"));
     let wma = build_encode_args(OutFormat::Wma, i, o, &settings(true), &hi, &no_tags(), None).unwrap();
     assert_eq!(arg_after(&wma.args, "-ar"), Some("48000"));
@@ -264,7 +267,7 @@ fn explicit_mode_applies_depth_rate_gain_and_trim() {
     assert_eq!(arg_after(&plan.args, "-c:a"), Some("pcm_s24le"));
     assert_eq!(arg_after(&plan.args, "-ar"), Some("48000"));
     let af = arg_after(&plan.args, "-af").unwrap();
-    assert!(af.contains("silenceremove") && af.contains("aformat=sample_rates=48000,") && !af.contains("channel_layouts") && af.ends_with("volume=-3.5000dB"), "{af}");
+    assert!(af.contains("silenceremove") && af.contains("aresample=48000:") && !af.contains("channel_layouts") && af.ends_with("volume=-3.5000dB"), "{af}");
     // Gain is ignored in keep mode.
     let keep = build_encode_args(OutFormat::Wav, Path::new("i"), Path::new("o"), &settings(true), &s, &no_tags(), Some(6.0)).unwrap();
     assert_eq!(arg_after(&keep.args, "-af"), None);
@@ -331,8 +334,14 @@ fn max_volume_is_parsed() {
 
 // ------------------------------------------------- integration tests (FFmpeg)
 
+/// Integration tests skip when FFmpeg is missing, except when REQUIRE_FFMPEG is set
+/// (CI), where a missing FFmpeg must fail instead of passing silently.
 fn ffmpeg_available() -> bool {
-    hidden_command(&get_ffmpeg_executable()).arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+    let ok = hidden_command(&get_ffmpeg_executable()).arg("-version").stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+    if !ok && std::env::var_os("REQUIRE_FFMPEG").is_some() {
+        panic!("FFmpeg is required but {} does not run", get_ffmpeg_executable().display());
+    }
+    ok
 }
 
 fn ffmpeg(args: &[&str]) {
@@ -688,4 +697,119 @@ fn safe_file_name_is_idempotent_at_the_limit() {
     let once = safe_file_name(&name);
     assert_eq!(safe_file_name(&once), once);
     assert!(once.chars().count() <= STEM_LIMIT_CHARS);
+}
+
+#[test]
+fn verbatim_windows_paths_are_simplified() {
+    assert_eq!(simplify_verbatim_path(PathBuf::from(r"\\?\C:\Music\a.flac")), PathBuf::from(r"C:\Music\a.flac"));
+    assert_eq!(simplify_verbatim_path(PathBuf::from(r"\\?\UNC\nas\share\a.flac")), PathBuf::from(r"\\nas\share\a.flac"));
+    assert_eq!(simplify_verbatim_path(PathBuf::from("/Users/a/b.flac")), PathBuf::from("/Users/a/b.flac"));
+}
+
+#[test]
+fn sample_rate_cap_prefers_whole_ratios() {
+    assert_eq!(cap_rate(192000, 96000), 96000);
+    assert_eq!(cap_rate(176400, 96000), 88200);
+    assert_eq!(cap_rate(352800, 96000), 88200);
+    assert_eq!(cap_rate(44100, 96000), 44100);
+    assert_eq!(cap_rate(96000, 0), 96000);
+    assert_eq!(cap_rate(96000, 50000), 48000);
+    let mut st = settings(true);
+    st.max_sample_rate = Some(96000);
+    st.flac_compression_level = Some(0);
+    let hi = src(24, 192000, 2, true, false);
+    let plan = build_encode_args(OutFormat::Flac, Path::new("i"), Path::new("o"), &st, &hi, &no_tags(), None).unwrap();
+    assert_eq!(arg_after(&plan.args, "-ar"), Some("96000"));
+    assert!(arg_after(&plan.args, "-af").unwrap().starts_with("aresample=96000"));
+    assert_eq!(arg_after(&plan.args, "-compression_level"), Some("0"));
+    assert_eq!(arg_after(&plan.args, "-bits_per_raw_sample"), Some("24"));
+}
+
+#[test]
+fn max_rate_and_existing_file_policies_work_end_to_end() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let src = d.0.join("hires.flac");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=0.3:sample_rate=192000", "-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24", src.to_str().unwrap()]);
+    let out = d.0.join("out");
+
+    // Same-as-source + 96 kHz limit: 24-bit / 96 kHz ALAC.
+    let mut req = request(&src, &out, "ALAC", "capped");
+    req.settings.max_sample_rate = Some(96000);
+    let (path, _) = convert_blocking(&ctx(), &req).unwrap();
+    let info = probe_source(&get_ffmpeg_executable(), &path).unwrap();
+    assert_eq!((info.sample_rate, info.bits_per_sample), (Some(96000), Some(24)));
+
+    // Skip: nothing is encoded, the existing file is reported.
+    let before = fs::read(&path).unwrap();
+    let mut req = request(&src, &out, "ALAC", "capped");
+    req.settings.on_existing = Some("skip".into());
+    let done = convert_blocking_ex(&ctx(), &req).unwrap();
+    assert!(done.skipped);
+    assert_eq!(done.path, path);
+    assert_eq!(fs::read(&path).unwrap(), before);
+
+    // Overwrite: same name, new content (no limit -> 192 kHz).
+    let mut req = request(&src, &out, "ALAC", "capped");
+    req.settings.on_existing = Some("overwrite".into());
+    let done = convert_blocking_ex(&ctx(), &req).unwrap();
+    assert_eq!(done.path, path);
+    assert_eq!(probe_source(&get_ffmpeg_executable(), &path).unwrap().sample_rate, Some(192000));
+    assert_eq!(fs::read_dir(&out).unwrap().count(), 1);
+
+    // Overwrite never replaces the source itself.
+    let mut req = request(&src, &d.0, "FLAC", "hires");
+    req.settings.on_existing = Some("overwrite".into());
+    let source_before = fs::read(&src).unwrap();
+    let done = convert_blocking_ex(&ctx(), &req).unwrap();
+    assert_eq!(done.name, "hires (1).flac");
+    assert_eq!(fs::read(&src).unwrap(), source_before);
+    let src_canon = fs::canonicalize(&src).unwrap();
+    assert_eq!(done.replaces.as_deref().map(fs::canonicalize).map(Result::unwrap), Some(src_canon));
+    // While the source is still there, it cannot be replaced.
+    assert!(move_into_place(&done.path, &src).is_err());
+    assert!(done.path.is_file());
+    // After the source went away (trash), the output takes its name.
+    fs::remove_file(&src).unwrap();
+    move_into_place(&done.path, &src).unwrap();
+    assert!(src.is_file() && !done.path.exists());
+
+    // Skip does not count the source itself as an existing output.
+    let mut req = request(&src, &d.0, "FLAC", "hires");
+    req.settings.on_existing = Some("skip".into());
+    let done = convert_blocking_ex(&ctx(), &req).unwrap();
+    assert!(!done.skipped);
+    assert_eq!(done.name, "hires (1).flac");
+    assert!(done.replaces.is_none());
+
+    // A folder with the planned name is skipped over, not an error.
+    fs::create_dir(d.0.join("folder.flac")).unwrap();
+    let mut req = request(&src, &d.0, "FLAC", "folder");
+    req.settings.on_existing = Some("overwrite".into());
+    let done = convert_blocking_ex(&ctx(), &req).unwrap();
+    assert_eq!(done.name, "folder (1).flac");
+}
+
+#[test]
+fn verification_compares_resampled_output_at_its_own_rate() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let src = d.0.join("hires.flac");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=1000:duration=1:sample_rate=192000", "-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24", src.to_str().unwrap()]);
+    let mut req = request(&src, &d.0.join("out"), "FLAC", "capped");
+    req.settings.max_sample_rate = Some(96000);
+    let (out, _) = convert_blocking(&ctx(), &req).unwrap();
+    let res = tauri::async_runtime::block_on(crate::audio::audit::verify_audio_quality(
+        src.to_string_lossy().into_owned(),
+        out.to_string_lossy().into_owned(),
+        false,
+        None,
+    ));
+    let r = res.result.expect("verification result");
+    assert!(r.correlation_percent.unwrap_or(0.0) > 99.0, "correlation {:?} status {}", r.correlation_percent, r.status);
+    assert_ne!(r.status, "degraded");
 }

@@ -51,7 +51,10 @@ npm run dev
 ```bash
 npm run build
 ```
-※ ビルド実行時に自動的に Next.js の古い型定義キャッシュ（`renderer/.next`）がクリーンアップされ、`dist/Audio Converter Setup 1.0.5.exe` (NSIS インストーラー) および `dist/Audio Converter-1.0.5-win.zip` (Zip 圧縮パッケージ) が同時に生成されます。
+※ Tauri でビルドし、インストーラーは `src-tauri/target/release/bundle/` に生成されます。
+
+#### 同梱する FFmpeg
+`npm install` 時に `scripts/prepare-ffmpeg.mjs` が FFmpeg を `src-tauri/binaries/` にコピーし、アプリに同梱します（ライセンス文も同梱）。既定は `ffmpeg-static` のバイナリで、`FFMPEG_BUNDLE_SOURCE` で別のビルドを指定できます。リリースビルド（`node scripts/prepare-ffmpeg.mjs --release`）では、必要なエンコーダがない FFmpeg や `--enable-nonfree` でビルドされた（再配布できない）FFmpeg を拒否します。macOS のリリースでは、`scripts/build-ffmpeg-macos.sh` が公式ソースから LGPL 版の FFmpeg（LAME・Opus・Vorbis を静的リンク）をビルドして同梱します（npm の macOS 版 FFmpeg は再配布できないビルドのため）。
 
 ### 課題点・既知の制限事項
 
@@ -109,7 +112,10 @@ npm run dev
 ```bash
 npm run build
 ```
-* Executing the build automatically purges stale Next.js cache (`renderer/.next`) and packages both `dist/Audio Converter Setup 1.0.5.exe` (NSIS Installer) and `dist/Audio Converter-1.0.5-win.zip` (Portable Zip Archive).
+* Builds with Tauri; installers are written to `src-tauri/target/release/bundle/`.
+
+#### Bundled FFmpeg
+`npm install` runs `scripts/prepare-ffmpeg.mjs`, which copies FFmpeg to `src-tauri/binaries/` so it ships with the app (with its license text). The default is the `ffmpeg-static` binary; set `FFMPEG_BUNDLE_SOURCE` to use another build. Release builds (`node scripts/prepare-ffmpeg.mjs --release`) refuse an FFmpeg that lacks a required encoder or was built with `--enable-nonfree` (not redistributable). macOS releases bundle an LGPL FFmpeg built from the official sources by `scripts/build-ffmpeg-macos.sh` (LAME, Opus and Vorbis linked statically), because the npm macOS binary is a non-redistributable build.
 
 ### Known Limitations
 
@@ -124,14 +130,14 @@ npm run build
 - WAVのテキストタグはUnicode対応のID3v2.3として保存します。
 - 保存はFFmpegで一元処理し、ブラウザの音声バッファは出力生成に使用しません。プレビューは保存された出力から生成します。
 - ピーク正規化を有効にした場合はピーク目標値を優先し、手動音量変更は適用しません。無音トリムは先頭・末尾を対象とします。
-- 出力名のみNFC正規化し、Windows禁止文字・予約名・長すぎる名前を処理します。入力パスは変更しません。同名ファイルは連番で保存します。
-- 完成した出力を同じ保存先の一時ファイルからハードリンクで確定します。FAT/exFAT等のハードリンク非対応の保存先では排他的に新規ファイルを作成し、コピー失敗時には削除します。元ファイルや既存出力を上書きしません。
+- 出力名のみNFC正規化し、Windows禁止文字・予約名・長すぎる名前を処理します。入力パスは変更しません。同名ファイルがある場合は、設定に応じて連番を付ける・上書きする・スキップするのいずれかを行います（既定は連番）。
+- 完成した出力を同じ保存先の一時ファイルからハードリンクで確定します。FAT/exFAT等のハードリンク非対応の保存先では排他的に新規ファイルを作成し、コピー失敗時には削除します。「上書き」を選んだ場合のみ既存出力を置き換えます。元ファイル自身は上書きしません。
 - PCM完全一致は、元の精度を保持したfloat64 PCMのSHA-256とサンプルレート・チャンネル数・PCMバイト数で判断します。これはコンテナやタグを含むファイル全体の一致ではありません。
 - 音声構成が異なる場合は完全一致とせず、波形比較は実行しません。ハッシュ・波形解析失敗は検証失敗として扱います。
 - 自動検証が有効な場合、検証失敗やwarning/degradedの出力では元ファイルをゴミ箱へ移しません。
-- Windows/macOS/Linux CIで生成音源を使う回帰テストを実行します。`npm run typecheck` と `npm test` でローカル検証できます。`FFMPEG_PATH` で検証する実行ファイルを指定できます。
+- Windows/macOS/Linux CIで生成音源を使う回帰テストを実行します。`npm run typecheck`・`npm test`・`src-tauri` での `cargo test --lib` でローカル検証できます。`FFMPEG_PATH` で使う FFmpeg を指定できます。
 - ログはElectronのuserData内の `debug_ipc.log` に保存します。
 - キャンセルは実行中のFFmpeg（正規化解析・変換・プレビュー・自動検証）を停止し、停止完了まで新しいバッチを開始しません。保存確定済みの出力は保持します。元ファイルのゴミ箱移動を既にOSへ依頼した場合、その操作は取り消せません。
 - 正規化解析と変換の進捗はFFmpegの処理時刻から表示します。バッチ終了通知は成功・失敗・要確認の件数を表示します。
 
-The native FFmpeg pipeline applies conversion settings, preserves supported source precision, and previews the saved output. Output names retain Unicode while sanitizing Windows restrictions. Existing files are never overwritten; publication uses hard links with an exclusive-copy fallback for FAT/exFAT. Exact PCM verification uses float64 PCM SHA-256 plus audio structure and decoded byte count. Failed analysis never passes verification. Optional source trashing is withheld when enabled automatic verification fails or reports warning/degraded.
+The native FFmpeg pipeline applies conversion settings, preserves supported source precision, and previews the saved output. Output names retain Unicode while sanitizing Windows restrictions. When the output name exists, the file gets a number, replaces it, or is skipped, as set (default: number); the source file itself is never replaced. Publication uses hard links with an exclusive-copy fallback for FAT/exFAT. Exact PCM verification uses float64 PCM SHA-256 plus audio structure and decoded byte count. Failed analysis never passes verification. Optional source trashing is withheld when enabled automatic verification fails or reports warning/degraded.

@@ -38,21 +38,27 @@ pub struct VerifyQualityResponse {
     pub error: Option<String>,
 }
 
+/// FFmpeg to use, in order: $FFMPEG_PATH, the sidecar bundled next to the app
+/// executable, the npm ffmpeg-static binary (development), then `ffmpeg` on PATH.
 pub fn get_ffmpeg_executable() -> PathBuf {
-    // 0. Explicit override (tests, custom installs)
     if let Some(p) = std::env::var_os("FFMPEG_PATH").filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
-    // 1. Look in node_modules/ffmpeg-static
-    let local = Path::new("node_modules/ffmpeg-static/ffmpeg");
-    if local.exists() {
-        return local.to_path_buf();
+    let exe = if cfg!(windows) { ".exe" } else { "" };
+    // Tauri installs the sidecar next to the app executable without the target triple.
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        let sidecar = dir.join(format!("audio-convert-ffmpeg{exe}"));
+        if sidecar.is_file() {
+            return sidecar;
+        }
     }
-    let local_exe = Path::new("node_modules/ffmpeg-static/ffmpeg.exe");
-    if local_exe.exists() {
-        return local_exe.to_path_buf();
+    let name = format!("ffmpeg{exe}");
+    for base in ["node_modules", "../node_modules"] {
+        let local = Path::new(base).join("ffmpeg-static").join(&name);
+        if local.is_file() {
+            return local;
+        }
     }
-    // 2. Default to PATH
     PathBuf::from("ffmpeg")
 }
 
@@ -294,7 +300,12 @@ pub async fn verify_audio_quality(
     }
 
     // 2. Waveform Difference Analysis
-    let temp_orig = match decode_to_temp_wav(&original_path, None) {
+    // Compare at the output's sample rate: a resampled output (e.g. a 96 kHz limit on
+    // a 192 kHz source) would otherwise be compared sample by sample at different rates.
+    let converted_rate = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(&converted_path))
+        .ok()
+        .and_then(|info| info.sample_rate);
+    let temp_orig = match decode_to_temp_wav(&original_path, converted_rate) {
         Ok(p) => p,
         Err(e) => {
             return VerifyQualityResponse {

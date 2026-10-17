@@ -67,6 +67,8 @@ export interface AudioFile {
   sourceTags?: MetadataTags;
   /** Backend codec check (ALAC in .m4a is lossless, AAC is not). */
   sourceLossless?: boolean;
+  /** Sample rate of the source file; sampleRate follows the tab settings. */
+  sourceSampleRate?: number;
   normalizationApplied: boolean;
   gainMultiplier?: number;
   originalDeleted?: boolean;
@@ -100,6 +102,9 @@ export interface ConverterSettings {
   renameByTags: boolean; // Enable file renaming based on ID3 metadata tags
   renamePattern: string; // e.g. "%disc2%-%track2% %title%|%filename%" (legacy "{track} - {title}" also works)
   localSavePath: string; // Target directory path on Desktop
+  maxSampleRate?: number; // 0 = no limit; higher source rates are reduced (also in "same as source")
+  flacCompressionLevel?: number; // 0-8
+  onExisting?: 'rename' | 'overwrite' | 'skip'; // when the output file already exists
 }
 
 export interface SettingsPreset {

@@ -29,3 +29,36 @@ jobs:
             echo "::error::No tests were run. Check the test file names in tests/."
             exit 1
           fi
+
+  rust:
+    # Converter tests run real FFmpeg conversions (the ffmpeg-static binary).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      # postinstall copies FFmpeg to src-tauri/binaries (the Tauri build needs it).
+      - run: npm ci
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Run Rust tests
+        shell: bash
+        run: |
+          export FFMPEG_PATH="$(node -p "require('ffmpeg-static')" | tr -d '\r')"
+          # Fail (not skip) the FFmpeg tests if FFmpeg cannot run.
+          export REQUIRE_FFMPEG=1
+          cd src-tauri
+          cargo test --lib

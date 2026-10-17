@@ -30,6 +30,10 @@ export interface ConvertResult {
   path?: string;
   fileName?: string;
   error?: string;
+  /** The output already existed and "skip" was chosen; nothing was written. */
+  skipped?: boolean;
+  /** "Overwrite" hit the source itself; the output may take this path once the source is trashed. */
+  replacesPath?: string | null;
 }
 
 export interface VerificationResponse {
@@ -120,6 +124,15 @@ export class AppBridge {
       return await ipc.invoke<ConvertResult>('save-converted-file', request);
     }
     throw new Error('No desktop runtime detected');
+  }
+
+  /** Renames a finished output to `to` in the same folder; never replaces an existing file. */
+  static async moveOutputIntoPlace(from: string, to: string): Promise<ConvertResult> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<ConvertResult>('move_output_into_place', { from, to });
+    }
+    return { success: false, error: 'Not supported in this runtime' };
   }
 
   static async readOutputPreview(filePath: string, jobId?: string): Promise<ArrayBuffer> {

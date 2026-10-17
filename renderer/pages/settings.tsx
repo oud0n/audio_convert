@@ -160,7 +160,8 @@ export default function SettingsPage() {
   };
 
   const applyPreset = (preset: SettingsPreset) => {
-    setSettings(preset.settings);
+    // Keep settings the preset does not define (e.g. ones added after it was saved).
+    setSettings((prev) => ({ ...prev, ...preset.settings }));
     setSelectedPresetId(preset.id);
   };
 
@@ -424,6 +425,50 @@ export default function SettingsPage() {
                     </select>
                   </div>
                 )}
+              </div>
+
+              {/* Sample rate limit, FLAC level, existing files */}
+              <div className="grid grid-cols-3 gap-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs text-zinc-400 font-mono" title="Higher source rates are reduced; lower rates are kept. Applies in Same-as-Source mode too.">MAX SAMPLE RATE</label>
+                  <select
+                    value={settings.maxSampleRate ?? 0}
+                    onChange={(e) => updateSetting('maxSampleRate', parseInt(e.target.value))}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
+                  >
+                    <option value={0}>No limit</option>
+                    <option value={48000}>48 kHz</option>
+                    <option value={96000}>96 kHz</option>
+                    <option value={192000}>192 kHz</option>
+                  </select>
+                </div>
+                <div className={`space-y-1.5 ${(settings.outputFormat || '').toUpperCase() === 'FLAC' ? '' : 'opacity-40 pointer-events-none'}`}>
+                  <label className="text-xs text-zinc-400 font-mono">FLAC COMPRESSION</label>
+                  <select
+                    disabled={(settings.outputFormat || '').toUpperCase() !== 'FLAC'}
+                    value={settings.flacCompressionLevel ?? 5}
+                    onChange={(e) => updateSetting('flacCompressionLevel', parseInt(e.target.value))}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
+                  >
+                    {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((level) => (
+                      <option key={level} value={level}>
+                        {level}{level === 0 ? ' (fastest)' : level === 5 ? ' (default)' : level === 8 ? ' (smallest)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs text-zinc-400 font-mono">IF OUTPUT EXISTS</label>
+                  <select
+                    value={settings.onExisting ?? 'rename'}
+                    onChange={(e) => updateSetting('onExisting', e.target.value as any)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
+                  >
+                    <option value="rename">Add a number</option>
+                    <option value="overwrite">Overwrite</option>
+                    <option value="skip">Skip</option>
+                  </select>
+                </div>
               </div>
             </div>
 

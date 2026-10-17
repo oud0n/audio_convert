@@ -47,6 +47,16 @@ pub struct ConverterSettings {
     pub save_in_source_folder: Option<bool>,
     #[serde(rename = "localSavePath")]
     pub local_save_path: Option<String>,
+    /// Upper limit for the output sample rate (0 / None = no limit). Applies in
+    /// "same as source" mode too: higher rates are reduced, lower ones kept.
+    #[serde(rename = "maxSampleRate")]
+    pub max_sample_rate: Option<u32>,
+    /// FLAC compression level 0-12 (None = FFmpeg's default, 5).
+    #[serde(rename = "flacCompressionLevel")]
+    pub flac_compression_level: Option<u32>,
+    /// What to do when the output file already exists: "rename" (default), "overwrite", "skip".
+    #[serde(rename = "onExisting")]
+    pub on_existing: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -84,11 +94,18 @@ pub struct ConvertResponse {
     #[serde(rename = "fileName")]
     pub file_name: Option<String>,
     pub error: Option<String>,
+    /// The output already existed and "skip" was chosen; nothing was written.
+    pub skipped: bool,
+    /// "Overwrite" was chosen but the planned name was the source file itself, so the
+    /// output got a new name. Once the source is gone (moved to the trash), the output
+    /// can take this path with `move_output_into_place`.
+    #[serde(rename = "replacesPath")]
+    pub replaces_path: Option<String>,
 }
 
 impl ConvertResponse {
     fn failure(error: String) -> Self {
-        Self { success: false, path: None, file_name: None, error: Some(error) }
+        Self { success: false, path: None, file_name: None, error: Some(error), skipped: false, replaces_path: None }
     }
 }
 
@@ -536,12 +553,25 @@ fn layout_name(channels: u32) -> String {
 }
 
 /// Output sample rate and channel count.
+const STANDARD_RATES: [u32; 13] = [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000];
+
+/// Highest standard rate <= `max`, preferring one that divides `rate` evenly
+/// (192k -> 96k, 176.4k -> 88.2k with a 96k limit).
+pub fn cap_rate(rate: u32, max: u32) -> u32 {
+    if max == 0 || rate <= max {
+        return rate;
+    }
+    let below: Vec<u32> = STANDARD_RATES.iter().copied().chain([max]).filter(|&r| r <= max).collect();
+    below.iter().copied().filter(|&r| rate % r == 0).max().or_else(|| below.iter().copied().max()).unwrap_or(max)
+}
+
 pub fn target_shape(format: OutFormat, settings: &ConverterSettings, source: &SourceInfo) -> (Option<u32>, Option<u32>) {
     let (rate, channels) = if same_as_source(settings) {
         (source.sample_rate, source.channels)
     } else {
         (settings.sample_rate.or(source.sample_rate), settings.channels.or(source.channels))
     };
+    let rate = rate.map(|r| cap_rate(r, settings.max_sample_rate.unwrap_or(0)));
     if format.is_lossless() {
         return (rate, channels);
     }
@@ -571,10 +601,11 @@ pub fn pre_gain_filters(format: OutFormat, settings: &ConverterSettings, source:
             filters.push(format!("channelmap=channel_layout={}", layout_name(n)));
         }
     }
-    let mut constraints = Vec::new();
     if let Some(sr) = rate.filter(|&sr| Some(sr) != source.sample_rate) {
-        constraints.push(format!("sample_rates={sr}"));
+        // Higher-quality settings than the default resampler (longer filter, steeper cutoff).
+        filters.push(format!("aresample={sr}:filter_size=64:phase_shift=10:cutoff=0.97"));
     }
+    let mut constraints = Vec::new();
     // Lossy encoders only accept standard layouts, so always name one for them. Lossless
     // outputs keep the source layout untouched unless the channel count changes.
     if let Some(ch) = channels.filter(|&ch| !format.is_lossless() || Some(ch) != source.channels) {
@@ -684,6 +715,12 @@ pub fn build_encode_args(
             format!("{}{}", if stored_bits > 16 { "s32" } else { "s16" }, if planar { "p" } else { "" })
         };
         args.extend(["-sample_fmt".into(), sample_fmt, "-bits_per_raw_sample".into(), stored_bits.to_string()]);
+    }
+
+    if format == OutFormat::Flac {
+        if let Some(level) = settings.flac_compression_level {
+            args.extend(["-compression_level".into(), level.min(12).to_string()]);
+        }
     }
 
     if !format.is_lossless() {
@@ -1217,6 +1254,8 @@ fn publish_unique(staging: &Path, dir: &Path, stem: &str, ext: &str, ctx: &JobCt
         match publish_output(staging, &destination) {
             Ok(()) => return Ok(destination),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Windows reports a folder with that name as "access denied".
+            Err(_) if fs::symlink_metadata(&destination).is_ok() => continue,
             Err(e) => return Err(format!("Failed to save output file: {e}")),
         }
     }
@@ -1232,6 +1271,21 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+/// On Windows `canonicalize` returns `\\\\?\\C:\\...`; turn that back into `C:\\...` (and
+/// `\\\\?\\UNC\\server\\share` into `\\\\server\\share`) for FFmpeg and for display.
+pub fn simplify_verbatim_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        if rest.as_bytes().get(1) == Some(&b':') {
+            return PathBuf::from(rest);
+        }
+    }
+    path
 }
 
 /// "~" and "~/x" -> the user's home folder (the UI's default paths use this form).
@@ -1264,10 +1318,37 @@ fn target_dir(request: &ConvertRequest, input: &Path) -> Result<PathBuf, String>
     }
 }
 
+pub struct Converted {
+    pub path: PathBuf,
+    pub name: String,
+    pub skipped: bool,
+    /// See `ConvertResponse::replaces_path`.
+    pub replaces: Option<PathBuf>,
+}
+
+/// True when `path` names the (canonicalized) input file.
+fn is_input(path: &Path, input: &Path) -> bool {
+    fs::canonicalize(path).map(simplify_verbatim_path).is_ok_and(|p| p == input)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OnExisting {
+    Rename,
+    Overwrite,
+    Skip,
+}
+
+#[cfg(test)]
 fn convert_blocking(ctx: &JobCtx, request: &ConvertRequest) -> Result<(PathBuf, String), String> {
+    convert_blocking_ex(ctx, request).map(|c| (c.path, c.name))
+}
+
+fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Converted, String> {
     // Absolute, resolved input path: FFmpeg reads relative names like "concat:a|b"
     // or "-x" as protocols/options.
-    let input = fs::canonicalize(&request.input_file_path).map_err(|_| "Input file does not exist".to_string())?;
+    let input = fs::canonicalize(&request.input_file_path)
+        .map(simplify_verbatim_path)
+        .map_err(|_| "Input file does not exist".to_string())?;
     if !input.is_file() {
         return Err("Input file does not exist".into());
     }
@@ -1277,6 +1358,18 @@ fn convert_blocking(ctx: &JobCtx, request: &ConvertRequest) -> Result<(PathBuf, 
     let dir = target_dir(request, &input)?;
     fs::create_dir_all(&dir).map_err(|e| format!("Cannot create output folder {}: {e}", dir.display()))?;
     let stem = output_stem(&request.file_name, &input);
+    let on_existing = match request.settings.on_existing.as_deref() {
+        Some("overwrite") => OnExisting::Overwrite,
+        Some("skip") => OnExisting::Skip,
+        _ => OnExisting::Rename,
+    };
+    let planned = dir.join(format!("{stem}.{ext}"));
+    // Only an existing file counts (not a folder or a dangling link), and never the
+    // source itself: converting a file into its own folder and format is not "done".
+    if on_existing == OnExisting::Skip && planned.is_file() && !is_input(&planned, &input) {
+        let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        return Ok(Converted { path: planned, name, skipped: true, replaces: None });
+    }
 
     let ffmpeg = get_ffmpeg_executable();
     let source = probe_source(&ffmpeg, &input)?;
@@ -1331,16 +1424,18 @@ fn convert_blocking(ctx: &JobCtx, request: &ConvertRequest) -> Result<(PathBuf, 
         append_wav_tags(&temp_output, &tags)?;
     }
 
-    // In "same as source" mode a lossless output must keep rate, channels and bit depth.
+    // In "same as source" mode a lossless output must have exactly the planned
+    // rate (the source's, or the capped one), channels and bit depth.
     if same_as_source(settings) && format.is_lossless() {
+        let (rate, channels) = target_shape(format, settings, &source);
         let out = probe_source(&ffmpeg, &temp_output)?;
-        let mismatch = (source.sample_rate.is_some() && out.sample_rate != source.sample_rate)
-            || (source.channels.is_some() && out.channels != source.channels)
+        let mismatch = (rate.is_some() && out.sample_rate != rate)
+            || (channels.is_some() && out.channels != channels)
             || (plan.expected_bits.is_some() && out.bits_per_sample.is_some() && out.bits_per_sample != plan.expected_bits);
         if mismatch {
             return Err(format!(
-                "Output does not keep the source format (source {:?} Hz / {:?} ch / {:?} bit, output {:?} Hz / {:?} ch / {:?} bit)",
-                source.sample_rate, source.channels, source.bits_per_sample, out.sample_rate, out.channels, out.bits_per_sample
+                "Output does not keep the planned format (planned {:?} Hz / {:?} ch / {:?} bit, output {:?} Hz / {:?} ch / {:?} bit)",
+                rate, channels, plan.expected_bits, out.sample_rate, out.channels, out.bits_per_sample
             ));
         }
     }
@@ -1364,9 +1459,25 @@ fn convert_blocking(ctx: &JobCtx, request: &ConvertRequest) -> Result<(PathBuf, 
         })();
         drop(out);
         copied.map_err(|e| format!("Cannot write to output folder: {e}"))?;
-        let destination = publish_unique(&staging, &dir, &stem, ext, ctx)?;
+        // Another job may have written the same name while this one was encoding.
+        let is_source = is_input(&planned, &input);
+        if on_existing == OnExisting::Skip && planned.is_file() && !is_source {
+            let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            return Ok(Converted { path: planned, name, skipped: true, replaces: None });
+        }
+        // Overwrite never replaces the source file itself; that falls back to a new name
+        // (the UI may move it into place after the source went to the trash).
+        let replaces = (on_existing == OnExisting::Overwrite && is_source).then(|| planned.clone());
+        let destination = if on_existing == OnExisting::Overwrite && !is_source && !planned.is_dir() {
+            ctx.check()?;
+            // Same folder, so this is an atomic replace (MoveFileEx REPLACE_EXISTING on Windows).
+            fs::rename(&staging, &planned).map_err(|e| format!("Failed to save output file: {e}"))?;
+            planned
+        } else {
+            publish_unique(&staging, &dir, &stem, ext, ctx)?
+        };
         let name = destination.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        Ok((destination, name))
+        Ok(Converted { path: destination, name, skipped: false, replaces })
     }
 }
 
@@ -1426,18 +1537,56 @@ pub async fn convert_audio(
     request: ConvertRequest,
 ) -> Result<ConvertResponse, String> {
     let ctx = JobCtx { app: Some(app), jobs: state.inner().clone(), job_id: request.job_id.clone() };
-    let result = tauri::async_runtime::spawn_blocking(move || convert_blocking(&ctx, &request))
+    let result = tauri::async_runtime::spawn_blocking(move || convert_blocking_ex(&ctx, &request))
         .await
         .map_err(|e| e.to_string())?;
     Ok(match result {
-        Ok((path, name)) => ConvertResponse {
+        Ok(done) => ConvertResponse {
             success: true,
-            path: Some(path.to_string_lossy().into_owned()),
-            file_name: Some(name),
+            path: Some(done.path.to_string_lossy().into_owned()),
+            file_name: Some(done.name),
             error: None,
+            skipped: done.skipped,
+            replaces_path: done.replaces.map(|p| p.to_string_lossy().into_owned()),
         },
         Err(e) => ConvertResponse::failure(e),
     })
+}
+
+/// Moves a finished output to `to`, which must no longer exist (the source it replaces
+/// was moved to the trash). Never replaces a file: if `to` exists again, nothing moves.
+pub fn move_into_place(from: &Path, to: &Path) -> Result<(), String> {
+    if !from.is_file() {
+        return Err(format!("Output file not found: {}", from.display()));
+    }
+    if from.parent() != to.parent() {
+        return Err("The output can only be moved within its folder".into());
+    }
+    publish_output(from, to).map_err(|e| format!("Cannot rename output: {e}"))?;
+    fs::remove_file(from).map_err(|e| format!("Renamed, but cannot remove {}: {e}", from.display()))
+}
+
+#[tauri::command]
+pub async fn move_output_into_place(from: String, to: String) -> ConvertResponse {
+    let (from, to) = (PathBuf::from(from), PathBuf::from(to));
+    let result = tauri::async_runtime::spawn_blocking({
+        let (from, to) = (from.clone(), to.clone());
+        move || move_into_place(&from, &to)
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    match result {
+        Ok(()) => ConvertResponse {
+            success: true,
+            path: Some(to.to_string_lossy().into_owned()),
+            file_name: to.file_name().map(|n| n.to_string_lossy().into_owned()),
+            error: None,
+            skipped: false,
+            replaces_path: None,
+        },
+        Err(e) => ConvertResponse::failure(e),
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "audio_convert",
-  "version": "0.1.0",
+  "version": "../package.json",
   "identifier": "com.oud0n.audioconvert",
   "build": {
     "frontendDist": "../app",
@@ -37,6 +37,12 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    },
+    "externalBin": [
+      "binaries/audio-convert-ffmpeg"
+    ],
+    "resources": {
+      "binaries/ffmpeg-LICENSE.txt": "licenses/ffmpeg-LICENSE.txt"
     }
   }
 }
