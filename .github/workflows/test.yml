@@ -19,4 +19,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
+      # Fail when no test ran: node --test exits 0 if the glob matches nothing.
+      # Summary line is "# tests N" (TAP) or "ℹ tests N" (spec).
+      - name: Run tests
+        shell: bash
+        run: |
+          npm test 2>&1 | tee test-output.txt
+          if ! grep -Eq '^(#|ℹ) tests [1-9]' test-output.txt; then
+            echo "::error::No tests were run. Check the test file names in tests/."
+            exit 1
+          fi
