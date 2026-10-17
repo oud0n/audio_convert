@@ -74,7 +74,8 @@ for entry in "${SOURCES[@]}"; do
   [ "$(sha256 "$name")" = "$sha" ] || { echo "checksum mismatch: $name" >&2; exit 1; }
   dir="${name%.tar.*}"
   rm -rf "$dir"
-  tar -xf "$name"
+  # soxr ships a symlink only used by its install check; MSYS2 cannot create it.
+  tar --exclude='*/inst-check-soxr-lsr' -xf "$name"
 done
 
 static_lib() { # dir [configure args...]
@@ -114,6 +115,7 @@ cd "$SRC/ffmpeg-7.1.1"
   --pkg-config-flags=--static \
   --extra-cflags="-I$PREFIX/include" \
   --extra-ldflags="$EXTRA_LDFLAGS" \
+  --extra-libs=-lm \
   --disable-autodetect \
   "${OS_FLAGS[@]}" \
   --enable-libmp3lame \
