@@ -15,6 +15,7 @@ import { estimateOutputSize } from '../utils/audioEncoder';
 import { MetadataTags, getFormatExtension } from '../types';
 import { t } from '../utils/i18n';
 import { AppBridge, isTauri } from '../services/bridge';
+import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS } from '../utils/fileNamePattern';
 
 export default function HomeDashboardPage() {
   const {
@@ -433,13 +434,8 @@ export default function HomeDashboardPage() {
       return new Promise((resolve) => {
         if (entry.isFile) {
           entry.file((file: File) => {
-            const ext = file.name.substring(file.name.lastIndexOf('.') + 1).toLowerCase();
-            const supported = [
-              'mp3', 'wav', 'flac', 'm4a', 'ogg', 'opus', 'alac', 'aiff', 
-              'mp2', 'wma', 'wavpack', 'w64', 'rf64', 'dts', 'ac3', 'swf', 
-              'tak', 'ape', 'mpc', 'ofr', 'tta', 'raw', 'dsd'
-            ];
-            if (supported.includes(ext)) {
+            const ext = file.name.lastIndexOf('.') > 0 ? file.name.substring(file.name.lastIndexOf('.') + 1).toLowerCase() : '';
+            if (SUPPORTED_INPUT_EXTENSIONS.includes(ext)) {
               let fullPath = topLevelPath;
               if (isTopLevelDir && entry.fullPath) {
                 // Split and remove the first segment (which matches the topLevelPath folder name)
@@ -513,36 +509,40 @@ export default function HomeDashboardPage() {
     }
   };
 
+  // Register the native drop listener once; call the latest handler through a ref.
+  const handleAddFilesRef = useRef(handleAddFiles);
+  handleAddFilesRef.current = handleAddFiles;
   useEffect(() => {
     if (!isTauri()) return;
+    let disposed = false;
     let unlisten: (() => void) | null = null;
     import('@tauri-apps/api/webviewWindow')
-      .then(({ getCurrentWebviewWindow }) => {
-        getCurrentWebviewWindow()
-          .onDragDropEvent(async (event) => {
-            if (event.payload.type === 'drop') {
-              const paths = event.payload.paths;
-              if (paths && paths.length > 0) {
-                const fileObjects: File[] = [];
-                for (const p of paths) {
-                  const name = p.replace(/^.*[\\/]/, '');
-                  const file = new File([], name);
-                  (file as any).path = p;
-                  fileObjects.push(file);
-                }
-                handleAddFiles(fileObjects);
-              }
-            }
-          })
-          .then((fn) => {
-            unlisten = fn;
-          });
+      .then(({ getCurrentWebviewWindow }) => getCurrentWebviewWindow().onDragDropEvent((event) => {
+        if (event.payload.type !== 'drop') return;
+        const fileObjects: File[] = [];
+        for (const p of event.payload.paths || []) {
+          const name = p.replace(/^.*[\\/]/, '');
+          const dot = name.lastIndexOf('.');
+          // Folders (no extension) are not expanded here.
+          if (dot <= 0) continue;
+          const ext = name.slice(dot + 1).toLowerCase();
+          if (!SUPPORTED_INPUT_EXTENSIONS.includes(ext)) continue;
+          const file = new File([], name);
+          (file as any).path = p;
+          fileObjects.push(file);
+        }
+        if (fileObjects.length > 0) handleAddFilesRef.current(fileObjects);
+      }))
+      .then((fn) => {
+        if (disposed) fn();
+        else unlisten = fn;
       })
       .catch(() => {});
     return () => {
+      disposed = true;
       if (unlisten) unlisten();
     };
-  }, [handleAddFiles]);
+  }, []);
 
   const formatSize = (bytes: number) => {
     if (bytes === 0) return '0 B';
@@ -560,10 +560,8 @@ export default function HomeDashboardPage() {
   };
 
   // Helper lists for the format radio inputs
-  const allFormats = [
-    'MP3', 'MP2', 'Ogg', 'WMA', 'FLAC', 'WavPack', 'WAV', 'W64', 'RF64', 'DTS',
-    'Opus', 'ALAC', 'AC3', 'AIFF', 'M4A', 'SWF', 'TAK', 'APE', 'MPC', 'OFR', 'TTA', 'RAW', 'DSD'
-  ];
+  // Only formats the converter can write.
+  const allFormats = ['MP3', 'Ogg', 'WMA', 'FLAC', 'WavPack', 'WAV', 'Opus', 'ALAC', 'AC3', 'AIFF', 'M4A'];
 
   const actionModes = [
     { id: 'encode', label: lang === 'ja' ? 'エンコード' : 'Encode' },
@@ -867,32 +865,13 @@ export default function HomeDashboardPage() {
                         <td className="py-2 px-3 text-zinc-400 max-w-[200px] truncate">
                           {(() => {
                             if (file.status === 'completed') {
-                              return file.name;
+                              return file.outputFileName || file.name;
                             }
-                            if (settings.renameByTags && file.tags) {
-                              let pat = settings.renamePattern;
-                              pat = pat.replace('{artist}', file.tags.artist || 'Unknown Artist');
-                              pat = pat.replace('{title}', file.tags.title || 'Untitled');
-                              pat = pat.replace('{album}', file.tags.album || 'Unknown Album');
-                              pat = pat.replace('{albumArtist}', file.tags.albumArtist || 'Unknown Artist');
-                              
-                              const rawDisc = file.tags.disc ? file.tags.disc.toString().trim() : '1';
-                              const discInt = parseInt(rawDisc);
-                              const discStr = isNaN(discInt) ? '1' : discInt.toString();
-                              pat = pat.replace('{disc}', discStr);
-                              
-                              const rawTrack = file.tags.track ? file.tags.track.toString().trim() : '01';
-                              const trackInt = parseInt(rawTrack);
-                              const trackStr = isNaN(trackInt) ? '01' : trackInt.toString().padStart(2, '0');
-                              pat = pat.replace('{track}', trackStr);
-                              
-                              pat = pat.replace('{year}', file.tags.year || '2026');
-                              pat = pat.replace('{genre}', file.tags.genre || 'Electronic');
-                              return `${pat}.${getFormatExtension(file.outputFormat || settings.outputFormat)}`;
-                            }
-                            const dot = file.name.lastIndexOf('.');
-                            const base = dot !== -1 ? file.name.substring(0, dot) : file.name;
-                            return `${base}.${getFormatExtension(file.outputFormat || settings.outputFormat)}`;
+                            const ext = getFormatExtension(file.outputFormat || settings.outputFormat);
+                            const stem = settings.renameByTags && file.tags
+                              ? renderFileName(settings.renamePattern, file.tags, file.name)
+                              : renderFileName('%filename%', {}, file.name);
+                            return `${stem}.${ext}`;
                           })()}
                         </td>
                         
@@ -1167,7 +1146,7 @@ export default function HomeDashboardPage() {
                             renameByTags: true,
                           }));
                         }}
-                        placeholder="{artist} - {title}"
+                        placeholder="%disc2%-%track2% %title%|%filename%"
                         className={`flex-1 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-zinc-300 font-mono text-[11px] focus:outline-none focus:border-emerald-500 ${
                           !settings.renameByTags ? 'opacity-60' : ''
                         }`}
@@ -1519,7 +1498,7 @@ export default function HomeDashboardPage() {
                   {settings.outputFormat}
                 </span>
                 <span className="text-zinc-500 font-mono text-[10px]">
-                  {['WAV', 'FLAC', 'ALAC'].includes((settings.outputFormat || '').toUpperCase())
+                  {LOSSLESS_OUTPUT_FORMATS.includes((settings.outputFormat || '').toUpperCase())
                     ? (settings.sameAsSource ? 'Lossless (Same as Source)' : `${settings.bitDepth}-bit Lossless`)
                     : `${settings.bitrate} kbps`
                   }
@@ -1769,7 +1748,7 @@ export default function HomeDashboardPage() {
                 </div>
 
                 {/* Bitrate or Bit Depth selection */}
-                {settings.outputFormat === 'WAV' || settings.outputFormat === 'FLAC' ? (
+                {LOSSLESS_OUTPUT_FORMATS.includes((settings.outputFormat || '').toUpperCase()) ? (
                   <div className={`space-y-1.5 ${settings.sameAsSource ? 'opacity-40 pointer-events-none' : ''}`}>
                     <label className="text-zinc-450 text-[10px] font-mono text-zinc-550 block">{t(lang, 'bitDepth')}</label>
                     <div className="grid grid-cols-3 gap-1.5">
@@ -1880,20 +1859,20 @@ export default function HomeDashboardPage() {
 
                 <div className="grid grid-cols-2 gap-2 max-h-[220px] overflow-y-auto pr-1">
                   {[
-                    { tag: '{title}', descJa: 'タイトル (Title)', descEn: 'Track Title', example: 'Song Title' },
-                    { tag: '{artist}', descJa: 'アーティスト名 (Artist)', descEn: 'Artist Name', example: 'Artist Name' },
-                    { tag: '{album}', descJa: 'アルバム名 (Album)', descEn: 'Album Name', example: 'Album Title' },
-                    { tag: '{albumArtist}', descJa: 'アルバムアーティスト名', descEn: 'Album Artist', example: 'Various Artists' },
-                    { tag: '{track}', descJa: 'トラック番号 (Track)', descEn: 'Track Number', example: '01' },
-                    { tag: '{disc}', descJa: 'ディスク番号 (Disc)', descEn: 'Disc Number', example: '1' },
-                    { tag: '{year}', descJa: 'リリース年 (Year)', descEn: 'Release Year', example: '2026' },
-                    { tag: '{genre}', descJa: 'ジャンル (Genre)', descEn: 'Music Genre', example: 'Pop / Rock' },
+                    { tag: '%title%', descJa: 'タイトル (Title)', descEn: 'Track Title', example: 'Song Title' },
+                    { tag: '%artist%', descJa: 'アーティスト名 (Artist)', descEn: 'Artist Name', example: 'Artist Name' },
+                    { tag: '%album%', descJa: 'アルバム名 (Album)', descEn: 'Album Name', example: 'Album Title' },
+                    { tag: '%albumartist%', descJa: 'アルバムアーティスト名', descEn: 'Album Artist', example: 'Various Artists' },
+                    { tag: '%track2%', descJa: 'トラック番号（2 桁）', descEn: 'Track Number (2 digits)', example: '01' },
+                    { tag: '%disc2%', descJa: 'ディスク番号（2 桁）', descEn: 'Disc Number (2 digits)', example: '01' },
+                    { tag: '%year%', descJa: 'リリース年 (Year)', descEn: 'Release Year', example: '2026' },
+                    { tag: '%genre%', descJa: 'ジャンル (Genre)', descEn: 'Music Genre', example: 'Pop / Rock' },
+                    { tag: '%filename%', descJa: '元のファイル名', descEn: 'Source File Name', example: 'track01' },
                   ].map((item) => (
                     <button
                       key={item.tag}
                       onClick={() => {
-                        const current = settings.renamePattern || '';
-                        const updated = current ? `${current} - ${item.tag}` : item.tag;
+                        const updated = insertToken(settings.renamePattern || '', item.tag);
                         setSettings((prev) => ({
                           ...prev,
                           renamePattern: updated,
@@ -1912,18 +1891,7 @@ export default function HomeDashboardPage() {
                 <div className="p-2.5 bg-zinc-950 border border-zinc-800/80 rounded space-y-1 font-mono text-[10px]">
                   <span className="text-zinc-500 uppercase block">{lang === 'ja' ? '現在のパターンプレビュー:' : 'CURRENT PATTERN PREVIEW:'}</span>
                   <div className="text-emerald-400 font-semibold truncate">
-                    {(() => {
-                      let pat = settings.renamePattern || '{artist} - {title}';
-                      pat = pat.replace('{artist}', 'Beatsmith');
-                      pat = pat.replace('{title}', 'Track_01');
-                      pat = pat.replace('{album}', 'Demo Album');
-                      pat = pat.replace('{albumArtist}', 'Beatsmith');
-                      pat = pat.replace('{disc}', '1');
-                      pat = pat.replace('{track}', '01');
-                      pat = pat.replace('{year}', '2026');
-                      pat = pat.replace('{genre}', 'Electronic');
-                      return `${pat}.${getFormatExtension(settings.outputFormat)}`;
-                    })()}
+                    {`${renderFileName(settings.renamePattern || '', PREVIEW_TAGS, 'source file.wav')}.${getFormatExtension(settings.outputFormat)}`}
                   </div>
                 </div>
               </div>

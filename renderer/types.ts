@@ -6,6 +6,7 @@
 export function getFormatExtension(fmt: string): string {
   const upper = (fmt || '').toUpperCase();
   if (upper === 'ALAC') return 'm4a';
+  if (upper === 'WAVPACK') return 'wv';
   return upper.toLowerCase();
 }
 
@@ -20,6 +21,8 @@ export interface MetadataTags {
   genre: string;
   track: string;
   comment: string;
+  totalTracks?: string;
+  totalDiscs?: string;
 }
 
 export interface QualityVerificationResult {
@@ -60,6 +63,10 @@ export interface AudioFile {
   peakDb?: number;
   rmsDb?: number;
   tags: MetadataTags;
+  /** Tags as read from the source file; edits are detected against these. */
+  sourceTags?: MetadataTags;
+  /** Backend codec check (ALAC in .m4a is lossless, AAC is not). */
+  sourceLossless?: boolean;
   normalizationApplied: boolean;
   gainMultiplier?: number;
   originalDeleted?: boolean;
@@ -91,7 +98,7 @@ export interface ConverterSettings {
   deleteOriginalAfterConvert: boolean; // Deletes the original file from workspace once successfully converted
   saveInSourceFolder: boolean; // Save output files inside source directory
   renameByTags: boolean; // Enable file renaming based on ID3 metadata tags
-  renamePattern: string; // Rename pattern (e.g., "{track} - {artist} - {title}")
+  renamePattern: string; // e.g. "%disc2%-%track2% %title%|%filename%" (legacy "{track} - {title}" also works)
   localSavePath: string; // Target directory path on Desktop
 }
 

@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
 import { analyzeAudioBuffer } from '../utils/audioEncoder';
 import { AppBridge } from '../services/bridge';
+import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS } from '../utils/fileNamePattern';
 
 interface AudioConverterContextType {
   files: AudioFile[];
@@ -62,7 +63,7 @@ const defaultSettings: ConverterSettings = {
   deleteOriginalAfterConvert: true,
   saveInSourceFolder: true,
   renameByTags: true,
-  renamePattern: '{disc} - {track} - {title}',
+  renamePattern: DEFAULT_RENAME_PATTERN,
   localSavePath: '~/Music/Audio-Convert-Outputs',
 };
 
@@ -402,7 +403,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const processAndDecodeFile = (f: File, targetTabId: string): Promise<{ success: boolean; fileRecord?: AudioFile; error?: string }> => {
     return new Promise((resolve) => {
       const id = Math.random().toString(36).substring(2, 11);
-      const ext = f.name.substring(f.name.lastIndexOf('.') + 1).toLowerCase() || 'mp3';
+      const ext = f.name.lastIndexOf('.') > 0 ? f.name.substring(f.name.lastIndexOf('.') + 1).toLowerCase() : '';
 
       addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 解析開始 (サイズ: ${f.size} bytes, 拡張子: ${ext})`, 'info');
 
@@ -434,19 +435,10 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               const filePath = resolveFilePath(f);
               const info = analyzeAudioBuffer(buffer);
 
-              let initialTags = {
-                title: f.name.substring(0, f.name.lastIndexOf('.')) || f.name,
-                artist: 'Unknown Artist',
-                album: 'Converted Album',
-                albumArtist: 'Unknown Artist',
-                disc: '1',
-                year: new Date().getFullYear().toString(),
-                genre: 'Acoustic / Vocal',
-                track: '01',
-                comment: 'Rendered via Audio Convert',
-              };
+              let initialTags: MetadataTags = emptyTags();
+              let sourceLossless: boolean | undefined = undefined;
 
-              const createAndResolve = (finalTags: typeof initialTags, metaFormat?: any) => {
+              const createAndResolve = (finalTags: MetadataTags, metaFormat?: any) => {
                 const nativeSampleRate = metaFormat?.sampleRate || buffer.sampleRate;
                 const nativeChannels = metaFormat?.numberOfChannels || buffer.numberOfChannels;
                 const nativeBitrate = metaFormat?.bitrate ? `${Math.round(metaFormat.bitrate / 1000)}k` : `${settings.bitrate}k`;
@@ -470,6 +462,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                   peakDb: info.peakDb,
                   rmsDb: info.rmsDb,
                   tags: finalTags,
+                  sourceTags: { ...finalTags },
+                  sourceLossless,
                 };
                 resolve({ success: true, fileRecord });
               };
@@ -480,20 +474,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                     let metaFormat: any = undefined;
                     if (metaResult && metaResult.success) {
                       if (metaResult.tags) {
-                        initialTags = {
-                          title: metaResult.tags.title || initialTags.title,
-                          artist: metaResult.tags.artist || initialTags.artist,
-                          album: metaResult.tags.album || initialTags.album,
-                          albumArtist: metaResult.tags.albumArtist || initialTags.albumArtist,
-                          disc: metaResult.tags.disc || initialTags.disc,
-                          year: metaResult.tags.year || initialTags.year,
-                          genre: metaResult.tags.genre || initialTags.genre,
-                          track: metaResult.tags.track || initialTags.track,
-                          comment: 'Native Audio Convert',
-                        };
+                        initialTags = tagsFromMetadata(metaResult.tags);
                       }
                       if (metaResult.format) {
                         metaFormat = metaResult.format;
+                        sourceLossless = typeof metaResult.format.lossless === 'boolean' ? metaResult.format.lossless : undefined;
                       }
                     }
                     createAndResolve(initialTags, metaFormat);
@@ -521,17 +506,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                     addLogToTab(targetTabId, `[DEBUG] "${f.name}" - IPCデコード成功。WAVバイナリサイズ: ${arrayBuffer.byteLength} bytes`, 'success');
                     try {
                       // Read metadata tags using AppBridge
-                      let metadataTags = {
-                        title: f.name.substring(0, f.name.lastIndexOf('.')) || f.name,
-                        artist: 'Unknown Artist',
-                        album: 'Converted Album',
-                        albumArtist: 'Unknown Artist',
-                        disc: '1',
-                        year: new Date().getFullYear().toString(),
-                        genre: 'Acoustic / Vocal',
-                        track: '01',
-                        comment: 'Rendered via Audio Convert',
-                      };
+                      let metadataTags: MetadataTags = emptyTags();
 
                       let metaResultObj: any = null;
                       try {
@@ -540,17 +515,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                         metaResultObj = metaResult;
                         if (metaResult && metaResult.success && metaResult.tags) {
                           addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ解析成功: タイトル="${metaResult.tags.title}", アーティスト="${metaResult.tags.artist}"`, 'success');
-                          metadataTags = {
-                            title: metaResult.tags.title || metadataTags.title,
-                            artist: metaResult.tags.artist || metadataTags.artist,
-                            album: metaResult.tags.album || metadataTags.album,
-                            albumArtist: metaResult.tags.albumArtist || metadataTags.albumArtist,
-                            disc: metaResult.tags.disc || metadataTags.disc,
-                            year: metaResult.tags.year || metadataTags.year,
-                            genre: metaResult.tags.genre || metadataTags.genre,
-                            track: metaResult.tags.track || metadataTags.track,
-                            comment: 'Decoded via Native Engine',
-                          };
+                          metadataTags = tagsFromMetadata(metaResult.tags);
                         } else {
                           addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ解析失敗 (バックエンド側): ${metaResult?.error || '不明'}`, 'error');
                         }
@@ -589,6 +554,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                             peakDb: info.peakDb,
                             rmsDb: info.rmsDb,
                             tags: metadataTags,
+                            sourceTags: { ...metadataTags },
+                            sourceLossless: typeof metaResultObj?.format?.lossless === 'boolean' ? metaResultObj.format.lossless : undefined,
                           };
                           resolve({ success: true, fileRecord });
                         },
@@ -757,6 +724,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     const tabSettings = tab.settings;
     const job = { id: crypto.randomUUID(), cancelled: false };
     jobRef.current = job;
+    // Set once the output file exists on disk, so a later failure or cancel does not
+    // report a saved file as failed (a retry would then create "name (1).ext").
+    let publishedPath = '';
+    let publishedName = '';
+    let trashedOriginal = false;
     const checkActive = () => {
       if (job.cancelled) throw new Error(lang === 'ja' ? '処理を中断しました。' : 'Conversion cancelled.');
     };
@@ -783,37 +755,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       let wavBlob: Blob | null = null;
       let savedOutputPath = '';
 
-      let finalExportName = fileRecord.name;
-      if (tabSettings.renameByTags && fileRecord.tags) {
-        let pattern = tabSettings.renamePattern;
-        const safeSub = (str: string, token: string, val: string) => str.split(token).join(val);
-        pattern = safeSub(pattern, '{artist}', fileRecord.tags.artist || 'Unknown Artist');
-        pattern = safeSub(pattern, '{title}', fileRecord.tags.title || 'Untitled');
-        pattern = safeSub(pattern, '{album}', fileRecord.tags.album || 'Unknown Album');
-        pattern = safeSub(pattern, '{albumArtist}', fileRecord.tags.albumArtist || 'Unknown Artist');
-        
-        // Handle disc number (default to "1" if not found)
-        const rawDisc = fileRecord.tags.disc ? fileRecord.tags.disc.toString().trim() : '1';
-        const discInt = parseInt(rawDisc);
-        const discStr = isNaN(discInt) ? '1' : discInt.toString();
-        pattern = safeSub(pattern, '{disc}', discStr);
-        
-        // Handle track number (default to "01" if not found, padded to 2 digits)
-        const rawTrack = fileRecord.tags.track ? fileRecord.tags.track.toString().trim() : '01';
-        const trackInt = parseInt(rawTrack);
-        const trackStr = isNaN(trackInt) ? '01' : trackInt.toString().padStart(2, '0');
-        pattern = safeSub(pattern, '{track}', trackStr);
-        
-        pattern = safeSub(pattern, '{year}', fileRecord.tags.year || '2026');
-        pattern = safeSub(pattern, '{genre}', fileRecord.tags.genre || 'Electronic');
-        const targetExt = getFormatExtension(fileRecord.outputFormat);
-        finalExportName = `${pattern}.${targetExt}`;
-      } else {
-        const lastDot = fileRecord.name.lastIndexOf('.');
-        const baseName = lastDot !== -1 ? fileRecord.name.substring(0, lastDot) : fileRecord.name;
-        const targetExt = getFormatExtension(fileRecord.outputFormat);
-        finalExportName = `${baseName}.${targetExt}`;
-      }
+      const targetExt = getFormatExtension(fileRecord.outputFormat);
+      const outputStem = tabSettings.renameByTags && fileRecord.tags
+        ? renderFileName(tabSettings.renamePattern, fileRecord.tags, fileRecord.name)
+        : renderFileName('%filename%', {}, fileRecord.name);
+      let finalExportName = `${outputStem}.${targetExt}`;
 
       let verificationResult: any = undefined;
       // 1. Save to local disk via IPC
@@ -825,10 +771,14 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           inputFilePath: fileRecord.path,
           fileName: finalExportName,
           outputFormat: fileRecord.outputFormat,
-          tags: fileRecord.tags,
+          // Only edited tags; the converter copies everything else from the source.
+          tags: editedTags(fileRecord.tags, fileRecord.sourceTags),
         });
 
         if (saveResult?.success && saveResult.path) {
+          // Record the saved file before any cancel check can throw.
+          publishedPath = saveResult.path;
+          publishedName = saveResult.fileName || finalExportName;
           setTabs(prev => prev.map(tab => tab.id === tabId ? { ...tab, files: tab.files.map(file => file.id === id ? { ...file, outputPath: saveResult.path, outputFileName: saveResult.fileName } : file) } : tab));
         }
         checkActive();
@@ -853,8 +803,10 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         if (tabSettings.autoVerifyQuality && fileRecord.path && savedPath) {
           checkActive();
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] データ欠損・品質劣化チェックを実行中...` : `[${fileRecord.name}] Verifying quality and data loss...`, 'info');
-          const isLosslessPair = ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.originalFormat.toUpperCase()) &&
-                                ['WAV', 'FLAC', 'ALAC'].includes(fileRecord.outputFormat.toUpperCase());
+          // Bit-exact comparison only makes sense when the audio was not changed on purpose.
+          const isLosslessPair = tabSettings.sameAsSource &&
+                                isLosslessSource(fileRecord.sourceLossless, fileRecord.name) &&
+                                LOSSLESS_OUTPUT_FORMATS.includes(fileRecord.outputFormat.toUpperCase());
           try {
             const vRes = await AppBridge.verifyAudioQuality({
               jobId: job.id,
@@ -874,6 +826,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               addLogToTab(tabId, `Quality verification failed: ${vRes?.error || 'No result'}`, 'error');
             }
           } catch (vErr: any) {
+            if (job.cancelled) throw vErr;
             addLogToTab(tabId, `Quality verification failed: ${vErr.message}`, 'error');
           }
         }
@@ -890,6 +843,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         if (trashResult && trashResult.success) {
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動しました。` : `[${fileRecord.name}] Moved original file to trash.`, 'success');
           originalDeleted = true;
+          trashedOriginal = true;
         } else {
           batchRef.current.warnings++;
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルのゴミ箱への移動に失敗しました: ${trashResult.error}` : `[${fileRecord.name}] Failed to move original file to trash: ${trashResult.error}`, 'error');
@@ -924,9 +878,22 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換に成功しました。` : `[${fileRecord.name}] Conversion finished successfully.`, 'success');
 
     } catch (err: any) {
-      if (!job.cancelled) batchRef.current.failed++;
-      addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換失敗: ${err.message}` : `[${fileRecord.name}] Conversion failed: ${err.message}`, 'error');
-      updateFileStatus(tabId, id, 'failed', 0, err.message || 'Pipeline buffer overflow');
+      if (publishedPath) {
+        // The file was already written; only the steps after saving were stopped.
+        batchRef.current.success++;
+        batchRef.current.warnings++;
+        addLogToTab(tabId, lang === 'ja'
+          ? `[${fileRecord.name}] 出力は保存済みです（"${publishedPath}"）。保存後の処理は中断されました: ${err.message}`
+          : `[${fileRecord.name}] Output was saved ("${publishedPath}"); later steps stopped: ${err.message}`, 'info');
+        setTabs(prev => prev.map(t => t.id === tabId ? {
+          ...t,
+          files: t.files.map(f => f.id === id ? { ...f, status: 'completed', progress: 100, outputPath: publishedPath, outputFileName: publishedName, originalDeleted: trashedOriginal } : f),
+        } : t));
+      } else {
+        if (!job.cancelled) batchRef.current.failed++;
+        addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換失敗: ${err.message}` : `[${fileRecord.name}] Conversion failed: ${err.message}`, 'error');
+        updateFileStatus(tabId, id, 'failed', 0, err.message || 'Conversion failed');
+      }
     } finally {
       await AppBridge.finishConversionJob(job.id).catch(() => {});
       jobRef.current = null;
@@ -963,8 +930,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     }
 
     addLogToTab(targetTabId, lang === 'ja' ? `[${file.name}] 再検証を実行中...` : `[${file.name}] Re-running quality verification...`, 'info');
-    const isLosslessPair = ['WAV', 'FLAC', 'ALAC'].includes(file.originalFormat.toUpperCase()) &&
-                          ['WAV', 'FLAC', 'ALAC'].includes(file.outputFormat.toUpperCase());
+    const isLosslessPair = (tab.settings.sameAsSource ?? true) &&
+                          isLosslessSource(file.sourceLossless, file.name) &&
+                          LOSSLESS_OUTPUT_FORMATS.includes(file.outputFormat.toUpperCase());
 
     try {
       const vRes = await AppBridge.verifyAudioQuality({
@@ -1041,7 +1009,6 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           files: t.files.map(f => f.id === id ? {
             ...f,
             tags: { ...f.tags, ...newTags },
-            name: newTags.title ? `${newTags.title}.${f.originalFormat}` : f.name,
           } : f)
         };
       }
@@ -1067,6 +1034,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             convertedAudioUrl: null,
             convertedBlob: null,
             outputPath: undefined,
+            outputFileName: undefined,
             outputFormat: t.settings.outputFormat,
             bitrate: t.settings.bitrate,
             sampleRate: t.settings.sampleRate,

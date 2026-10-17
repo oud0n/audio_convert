@@ -11,6 +11,7 @@ import {
   Folder, Plus, Trash, FileText, Sparkles 
 } from '../components/Icons';
 import { ConverterSettings, SettingsPreset, getFormatExtension } from '../types';
+import { renderFileName, LOSSLESS_OUTPUT_FORMATS } from '../utils/fileNamePattern';
 
 export default function SettingsPage() {
   const { settings, setSettings } = useAudioConverter();
@@ -181,14 +182,8 @@ export default function SettingsPage() {
   ];
 
   const getRenamePreview = () => {
-    let outputName = settings.renamePattern;
-    outputName = outputName.replace('{artist}', 'Beatsmith');
-    outputName = outputName.replace('{title}', 'Drum_Loop_120bpm');
-    outputName = outputName.replace('{album}', 'X-Conv Synthesized Studio');
-    outputName = outputName.replace('{track}', '04');
-    outputName = outputName.replace('{year}', '2026');
-    outputName = outputName.replace('{genre}', 'Electronic');
-    return `${outputName}.${getFormatExtension(settings.outputFormat)}`;
+    const sample = { title: 'Drum_Loop_120bpm', artist: 'Beatsmith', album: 'Studio Session', albumArtist: 'Beatsmith', disc: '1', track: '4', year: '2026', genre: 'Electronic' };
+    return `${renderFileName(settings.renamePattern, sample, 'source file.wav')}.${getFormatExtension(settings.outputFormat)}`;
   };
 
   return (
@@ -397,7 +392,7 @@ export default function SettingsPage() {
                   </select>
                 </div>
 
-                {['WAV', 'FLAC', 'ALAC'].includes((settings.outputFormat || '').toUpperCase()) ? (
+                {LOSSLESS_OUTPUT_FORMATS.includes((settings.outputFormat || '').toUpperCase()) ? (
                   <div className={`space-y-1.5 ${settings.sameAsSource ? 'opacity-40 pointer-events-none' : ''}`}>
                     <label className="text-xs text-zinc-400 font-mono">BIT DEPTH</label>
                     <select
@@ -668,14 +663,18 @@ export default function SettingsPage() {
                     className={`w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none ${
                       !settings.renameByTags ? 'opacity-60' : ''
                     }`}
-                    placeholder="e.g. {artist} - {title}"
+                    placeholder="e.g. %disc2%-%track2% %title%|%filename%"
                   />
                   <div className="flex flex-wrap gap-1 mt-1.5 text-[9px] font-mono text-zinc-500">
-                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{artist}'}</span>
-                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{title}'}</span>
-                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{album}'}</span>
-                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{track}'}</span>
-                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'{year}'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'%disc2%'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'%track2%'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'%title%'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'%artist%'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'%album%'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'%albumartist%'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'%year%'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'%filename%'}</span>
+                    <span className="px-1 bg-zinc-950 border border-zinc-800 rounded">{'|'}</span>
                   </div>
                 </div>
 

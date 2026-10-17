@@ -17,6 +17,9 @@ export interface MetadataResult {
     sampleRate: number;
     numberOfChannels: number;
     bitrate: number;
+    bitDepth?: number | null;
+    lossless?: boolean;
+    codec?: string | null;
   };
   tags?: MetadataTags;
   error?: string;

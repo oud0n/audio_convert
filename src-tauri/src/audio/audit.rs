@@ -2,7 +2,6 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Serialize, Clone, Debug)]
 pub struct QualityVerificationDetails {
@@ -40,6 +39,10 @@ pub struct VerifyQualityResponse {
 }
 
 pub fn get_ffmpeg_executable() -> PathBuf {
+    // 0. Explicit override (tests, custom installs)
+    if let Some(p) = std::env::var_os("FFMPEG_PATH").filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
     // 1. Look in node_modules/ffmpeg-static
     let local = Path::new("node_modules/ffmpeg-static/ffmpeg");
     if local.exists() {
@@ -68,7 +71,7 @@ pub fn decode_to_temp_wav(
     let output_path = tmp_dir.join(temp_name);
 
     let ffmpeg = get_ffmpeg_executable();
-    let mut cmd = Command::new(ffmpeg);
+    let mut cmd = crate::audio::convert::hidden_command(&ffmpeg);
     cmd.args(["-y", "-i", file_path, "-map", "0:a:0", "-acodec", "pcm_s16le", "-ac", "2"]);
     if let Some(sr) = sample_rate {
         cmd.args(["-ar", &sr.to_string()]);
@@ -76,8 +79,16 @@ pub fn decode_to_temp_wav(
     cmd.args(["-map_metadata", "-1"]);
     cmd.arg(&output_path);
 
-    let status = cmd.status()?;
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    let status = match cmd.status() {
+        Ok(status) => status,
+        Err(e) => {
+            let _ = std::fs::remove_file(&output_path);
+            return Err(e.into());
+        }
+    };
     if !status.success() {
+        let _ = std::fs::remove_file(&output_path);
         return Err(format!("FFmpeg failed with exit code: {:?}", status.code()).into());
     }
 
@@ -88,7 +99,7 @@ pub fn compute_pcm_fingerprint(
     file_path: &str,
 ) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
     let ffmpeg = get_ffmpeg_executable();
-    let mut child = Command::new(ffmpeg)
+    let mut child = crate::audio::convert::hidden_command(&ffmpeg)
         .args([
             "-v",
             "error",
