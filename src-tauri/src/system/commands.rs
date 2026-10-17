@@ -101,6 +101,10 @@ pub fn expand_paths_blocking(paths: &[PathBuf], extensions: &[String]) -> Vec<Dr
             push(p, &mut out);
         }
     }
+    // A folder and a file inside it (or the same folder twice) can be dropped together;
+    // keep only the first copy of each file.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|f| seen.insert(std::fs::canonicalize(&f.path).unwrap_or_else(|_| PathBuf::from(&f.path))));
     out
 }
 
@@ -127,7 +131,10 @@ mod tests {
         }
         std::fs::write(root.join("single.mp3"), b"abc").unwrap();
         let exts = vec!["flac".to_string(), "wav".to_string(), "mp3".to_string()];
-        let got = expand_paths_blocking(&[album.clone(), root.join("single.mp3"), root.join("missing.flac")], &exts);
+        let got = expand_paths_blocking(
+            &[album.clone(), root.join("single.mp3"), album.join("02.flac"), root.join("missing.flac"), album.clone()],
+            &exts,
+        );
         let names: Vec<_> = got.iter().map(|f| f.path.strip_prefix(root.to_str().unwrap()).unwrap().replace('\\', "/")).collect();
         assert_eq!(names, ["/Album/01.FLAC", "/Album/02.flac", "/Album/CD2/01.wav", "/single.mp3"]);
         assert_eq!(got[3].size, 3);

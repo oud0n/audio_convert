@@ -741,6 +741,9 @@ pub fn build_encode_args(
     }
 
     if format == OutFormat::Flac {
+        // FFmpeg picks 16384/32768-sample blocks at high rates; its own FLAC reader drops
+        // frames over ~200 KB (multichannel hi-res), so use the reference encoder's 4096.
+        args.extend(["-frame_size".into(), "4096".into()]);
         if let Some(level) = settings.flac_compression_level {
             args.extend(["-compression_level".into(), level.min(12).to_string()]);
         }

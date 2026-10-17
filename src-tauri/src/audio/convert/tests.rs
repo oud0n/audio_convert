@@ -918,3 +918,28 @@ fn uncompressed_flac_writes_uncommon_rates_into_the_frame_header() {
         );
     }
 }
+
+#[test]
+fn multichannel_hi_res_flac_uses_small_blocks_and_reads_back() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    // 6 channels of noise at 352.8 kHz: FFmpeg's default 32768-sample blocks give frames
+    // its own FLAC reader drops, so the output would decode to nothing.
+    let src = d.0.join("dxd51.wav");
+    let ex = (0..6).map(|i| format!("0.5*sin(2*PI*{}*t)+0.3*(2*random({i})-1)", 440 + i * 100)).collect::<Vec<_>>().join("|");
+    ffmpeg(&["-f", "lavfi", "-i", &format!("aevalsrc=exprs={ex}:s=352800:d=0.5"), "-c:a", "pcm_s24le", src.to_str().unwrap()]);
+    for uncompressed in [false, true] {
+        let mut req = request(&src, &d.0.join("out"), "FLAC", &format!("u{uncompressed}"));
+        req.settings.flac_uncompressed = Some(uncompressed);
+        let path = convert_blocking_ex(&ctx(), &req).unwrap().path;
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(u16::from_be_bytes([bytes[10], bytes[11]]), 4096, "max block size");
+        assert_eq!(
+            compute_pcm_fingerprint(path.to_str().unwrap()).unwrap().0,
+            compute_pcm_fingerprint(src.to_str().unwrap()).unwrap().0,
+            "uncompressed={uncompressed}: bit-exact"
+        );
+    }
+}

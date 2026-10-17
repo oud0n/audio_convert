@@ -158,6 +158,9 @@ esac
   for f in "$SRC/lame-3.100/COPYING" "$SRC/soxr-0.1.3-Source/LICENCE" "$SRC/opus-1.5.2/COPYING" "$SRC/libvorbis-1.3.7/COPYING" "$SRC/libogg-1.3.5/COPYING"; do
     echo; echo "---- $(basename "$(dirname "$f")") ----"; cat "$f"
   done
+  echo; echo "---- PFFFT (in soxr) ----"
+  sed -n '/Copyright (c) 2013  Julien Pommier/,/^\*\//p' "$SRC/soxr-0.1.3-Source/src/pffft.c"
 } >"$LICENSE"
+grep -q "FFTPACKv5 license" "$LICENSE" || { echo "PFFFT licence notice not found" >&2; exit 1; }
 echo "$SCRIPT_HASH" >"$STAMP"
 done_message
