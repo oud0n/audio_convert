@@ -2,7 +2,7 @@
   "private": true,
   "name": "audio_convert",
   "description": "Audio Convert Application",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "author": "oud0n",
   "type": "module",
   "scripts": {
