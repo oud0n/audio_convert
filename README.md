@@ -54,7 +54,7 @@ npm run build
 ※ Tauri でビルドし、インストーラーは `src-tauri/target/release/bundle/` に生成されます。
 
 #### 同梱する FFmpeg
-`npm install` 時に `scripts/prepare-ffmpeg.mjs` が FFmpeg を `src-tauri/binaries/` にコピーし、アプリに同梱します（ライセンス文も同梱）。既定は `ffmpeg-static` のバイナリで、`FFMPEG_BUNDLE_SOURCE` で別のビルドを指定できます。リリースビルド（`node scripts/prepare-ffmpeg.mjs --release`）では、必要なエンコーダがない FFmpeg や `--enable-nonfree` でビルドされた（再配布できない）FFmpeg を拒否します。macOS のリリースでは、`scripts/build-ffmpeg-macos.sh` が公式ソースから LGPL 版の FFmpeg（LAME・Opus・Vorbis を静的リンク）をビルドして同梱します（npm の macOS 版 FFmpeg は再配布できないビルドのため）。
+`npm install` 時に `scripts/prepare-ffmpeg.mjs` が FFmpeg を `src-tauri/binaries/` にコピーし、アプリに同梱します（ライセンス文も同梱）。既定は `ffmpeg-static` のバイナリで、`FFMPEG_BUNDLE_SOURCE` で別のビルドを指定できます。リリースビルド（`node scripts/prepare-ffmpeg.mjs --release`）では、必要なエンコーダがない FFmpeg や `--enable-nonfree` でビルドされた（再配布できない）FFmpeg を拒否します。リリースでは全 OS で、`scripts/build-ffmpeg.sh` が公式ソース（ハッシュ固定）から LGPL 版の FFmpeg（LAME・Opus・Vorbis を静的リンク）をビルドして同梱します。GitHub Actions の `ffmpeg.yml` が macOS（Apple Silicon / Intel）・Linux・Windows（MSYS2）でこれをビルドし、テストとリリースで使います。ビルド結果はスクリプトのハッシュでキャッシュされ、スクリプトを変えたときだけ作り直されます。手元でも `scripts/build-ffmpeg.sh <作業フォルダ>` でビルドでき、最後の 2 行に出る `FFMPEG_BUNDLE_SOURCE` / `FFMPEG_BUNDLE_LICENSE` を指定して `node scripts/prepare-ffmpeg.mjs` を実行すると同梱されます。
 
 ### 課題点・既知の制限事項
 
@@ -115,7 +115,7 @@ npm run build
 * Builds with Tauri; installers are written to `src-tauri/target/release/bundle/`.
 
 #### Bundled FFmpeg
-`npm install` runs `scripts/prepare-ffmpeg.mjs`, which copies FFmpeg to `src-tauri/binaries/` so it ships with the app (with its license text). The default is the `ffmpeg-static` binary; set `FFMPEG_BUNDLE_SOURCE` to use another build. Release builds (`node scripts/prepare-ffmpeg.mjs --release`) refuse an FFmpeg that lacks a required encoder or was built with `--enable-nonfree` (not redistributable). macOS releases bundle an LGPL FFmpeg built from the official sources by `scripts/build-ffmpeg-macos.sh` (LAME, Opus and Vorbis linked statically), because the npm macOS binary is a non-redistributable build.
+`npm install` runs `scripts/prepare-ffmpeg.mjs`, which copies FFmpeg to `src-tauri/binaries/` so it ships with the app (with its license text). The default is the `ffmpeg-static` binary; set `FFMPEG_BUNDLE_SOURCE` to use another build. Release builds (`node scripts/prepare-ffmpeg.mjs --release`) refuse an FFmpeg that lacks a required encoder or was built with `--enable-nonfree` (not redistributable). Releases on every platform bundle an LGPL FFmpeg built from the official, checksum-pinned sources by `scripts/build-ffmpeg.sh` (LAME, Opus and Vorbis linked statically). The GitHub Actions workflow `ffmpeg.yml` builds it on macOS (Apple Silicon and Intel), Linux and Windows (MSYS2) for the test and release workflows; builds are cached by the script's hash, so FFmpeg is rebuilt only when the script changes. To build it locally, run `scripts/build-ffmpeg.sh <work-dir>` and pass the `FFMPEG_BUNDLE_SOURCE` / `FFMPEG_BUNDLE_LICENSE` values from its last two lines to `node scripts/prepare-ffmpeg.mjs`.
 
 ### Known Limitations
 

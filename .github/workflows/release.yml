@@ -9,14 +9,22 @@ permissions:
   contents: write # create the release and upload assets
 
 jobs:
+  ffmpeg:
+    uses: ./.github/workflows/ffmpeg.yml
+
   build-and-release:
     name: Build on ${{ matrix.os }}
+    needs: ffmpeg
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # macos-latest is Apple Silicon; macos-15-intel builds for Intel Macs.
-        os: [windows-latest, macos-latest, macos-15-intel, ubuntu-22.04]
+        include:
+          - { os: windows-latest, ffmpeg: windows-x64 }
+          - { os: macos-latest, ffmpeg: macos-arm64 }
+          - { os: macos-15-intel, ffmpeg: macos-x64 }
+          - { os: ubuntu-22.04, ffmpeg: linux-x64 }
 
     steps:
       - uses: actions/checkout@v4
@@ -40,27 +48,22 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # The npm ffmpeg-static binary for macOS is a --enable-nonfree build that may not
-      # be redistributed, so macOS bundles an LGPL FFmpeg built from source.
-      - name: Cache macOS FFmpeg build
-        if: runner.os == 'macOS'
-        uses: actions/cache@v4
+      # Every platform ships the LGPL FFmpeg built by ffmpeg.yml (scripts/build-ffmpeg.sh).
+      - uses: actions/download-artifact@v4
         with:
-          path: ${{ runner.temp }}/ffmpeg-macos
-          key: ffmpeg-macos-${{ runner.arch }}-${{ hashFiles('scripts/build-ffmpeg-macos.sh') }}
+          name: ffmpeg-${{ matrix.ffmpeg }}
+          path: ${{ runner.temp }}/ffmpeg
 
-      # FFmpeg's x86 assembly needs nasm (build tool only, not shipped).
-      - name: Install nasm (Intel macOS)
-        if: runner.os == 'macOS' && runner.arch == 'X64'
-        run: brew install nasm
-
-      - name: Build redistributable FFmpeg (macOS)
-        if: runner.os == 'macOS'
+      - name: Use the built FFmpeg
         shell: bash
-        run: scripts/build-ffmpeg-macos.sh "$RUNNER_TEMP/ffmpeg-macos" | tail -n 2 >> "$GITHUB_ENV"
+        run: |
+          bin="$(ls "$RUNNER_TEMP"/ffmpeg/bin/ffmpeg*)"
+          chmod +x "$bin" # artifacts do not keep the executable bit
+          echo "FFMPEG_BUNDLE_SOURCE=$bin" >> "$GITHUB_ENV"
+          echo "FFMPEG_BUNDLE_LICENSE=$RUNNER_TEMP/ffmpeg/FFMPEG-LICENSE.txt" >> "$GITHUB_ENV"
 
       # Release mode: fails if the FFmpeg to bundle lacks an encoder or was built
-      # with --enable-nonfree. FFMPEG_BUNDLE_SOURCE (set above on macOS) overrides.
+      # with --enable-nonfree.
       - name: Prepare bundled FFmpeg
         run: node scripts/prepare-ffmpeg.mjs --release
 

@@ -95,7 +95,7 @@ function main() {
     ? `FFmpeg source code for this version: https://ffmpeg.org/releases/ffmpeg-${upstreamVersion}.tar.xz`
     : 'FFmpeg source code: https://ffmpeg.org/download.html';
   const provider = process.env.FFMPEG_BUNDLE_SOURCE
-    ? 'Built by this project (see scripts/build-ffmpeg-macos.sh in the application source).'
+    ? 'Built by this project (see scripts/build-ffmpeg.sh in the application source).'
     : 'Binary from the ffmpeg-static npm package (https://github.com/eugeneware/ffmpeg-static); see its README for the builds and their sources.';
   const header = `Bundled FFmpeg\n${firstLine}\n${configLine}\n${sourceLine}\n${provider}\n\n`;
   if (licenses.length) {
