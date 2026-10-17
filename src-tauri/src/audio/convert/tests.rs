@@ -19,6 +19,7 @@ fn settings(keep: bool) -> ConverterSettings {
         local_save_path: None,
         max_sample_rate: None,
         flac_compression_level: None,
+        flac_uncompressed: None,
         on_existing: None,
     }
 }
@@ -161,7 +162,7 @@ fn lossy_outputs_get_rates_channels_and_bitrates_the_encoder_accepts() {
     let mp3 = build_encode_args(OutFormat::Mp3, i, o, &settings(true), &hi, &no_tags(), None).unwrap();
     assert_eq!(arg_after(&mp3.args, "-ar"), Some("48000"));
     assert_eq!(arg_after(&mp3.args, "-ac"), None, "channels are changed by a filter, never -ac");
-    assert_eq!(arg_after(&mp3.args, "-af"), Some("aresample=48000:filter_size=64:phase_shift=10:cutoff=0.97,aformat=channel_layouts=stereo"));
+    assert_eq!(arg_after(&mp3.args, "-af"), Some(format!("{},aformat=channel_layouts=stereo", resample_filter(48000)).as_str()));
     assert_eq!(arg_after(&mp3.args, "-b:a"), Some("192k"));
     let wma = build_encode_args(OutFormat::Wma, i, o, &settings(true), &hi, &no_tags(), None).unwrap();
     assert_eq!(arg_after(&wma.args, "-ar"), Some("48000"));
@@ -427,7 +428,7 @@ fn converts_24_bit_losslessly_with_requested_name_cover_and_tags() {
 
     // Same name again: a numbered copy, the first file is untouched.
     let (_, name) = convert_blocking(&ctx(), &request(&src, &out, "FLAC", "01-02 Renamed")).unwrap();
-    assert_eq!(name, "01-02 Renamed (1).flac");
+    assert_eq!(name, "01-02 Renamed_2.flac");
     let leftovers: Vec<_> = fs::read_dir(&out).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
     assert!(leftovers.is_empty(), "staging files must be removed");
 }
@@ -764,7 +765,7 @@ fn max_rate_and_existing_file_policies_work_end_to_end() {
     req.settings.on_existing = Some("overwrite".into());
     let source_before = fs::read(&src).unwrap();
     let done = convert_blocking_ex(&ctx(), &req).unwrap();
-    assert_eq!(done.name, "hires (1).flac");
+    assert_eq!(done.name, "hires_2.flac");
     assert_eq!(fs::read(&src).unwrap(), source_before);
     let src_canon = fs::canonicalize(&src).unwrap();
     assert_eq!(done.replaces.as_deref().map(fs::canonicalize).map(Result::unwrap), Some(src_canon));
@@ -781,7 +782,7 @@ fn max_rate_and_existing_file_policies_work_end_to_end() {
     req.settings.on_existing = Some("skip".into());
     let done = convert_blocking_ex(&ctx(), &req).unwrap();
     assert!(!done.skipped);
-    assert_eq!(done.name, "hires (1).flac");
+    assert_eq!(done.name, "hires_2.flac");
     assert!(done.replaces.is_none());
 
     // A folder with the planned name is skipped over, not an error.
@@ -789,7 +790,7 @@ fn max_rate_and_existing_file_policies_work_end_to_end() {
     let mut req = request(&src, &d.0, "FLAC", "folder");
     req.settings.on_existing = Some("overwrite".into());
     let done = convert_blocking_ex(&ctx(), &req).unwrap();
-    assert_eq!(done.name, "folder (1).flac");
+    assert_eq!(done.name, "folder_2.flac");
 }
 
 #[test]
@@ -812,4 +813,51 @@ fn verification_compares_resampled_output_at_its_own_rate() {
     let r = res.result.expect("verification result");
     assert!(r.correlation_percent.unwrap_or(0.0) > 99.0, "correlation {:?} status {}", r.correlation_percent, r.status);
     assert_ne!(r.status, "degraded");
+}
+
+#[test]
+fn uncompressed_flac_is_verbatim_bit_exact_and_keeps_tags_and_cover() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let ff = get_ffmpeg_executable();
+    // 24-bit stereo with a cover, and an odd-length 16-bit mono file (short last frame).
+    let hi = make_source(&d.0);
+    let mono = d.0.join("mono.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=300:sample_rate=44100:duration=0.3", "-af", "atrim=end_sample=10001", "-c:a", "pcm_s16le", mono.to_str().unwrap()]);
+
+    for (src, bits, channels, frames) in [(&hi, 24u32, 2u32, 96000u64), (&mono, 16, 1, 10001)] {
+        let mut req = request(src, &d.0.join("out"), "FLAC", "plain");
+        req.settings.flac_uncompressed = Some(true);
+        req.tags = Some(InputTags { artist: Some("Artist".into()), ..Default::default() });
+        let done = convert_blocking_ex(&ctx(), &req).unwrap();
+        let path = done.path;
+
+        assert!(flac_verbatim::first_frame_is_verbatim(&path).unwrap(), "{bits} bit: subframes must be VERBATIM");
+        let raw = frames * channels as u64 * bits as u64 / 8;
+        let size = fs::metadata(&path).unwrap().len();
+        assert!(size >= raw, "{bits} bit: {size} bytes is smaller than the raw audio ({raw})");
+        assert_eq!(
+            compute_pcm_fingerprint(path.to_str().unwrap()).unwrap().0,
+            compute_pcm_fingerprint(src.to_str().unwrap()).unwrap().0,
+            "{bits} bit: audio must be bit-exact"
+        );
+        // FFmpeg verifies every frame CRC and the MD5 of the decoded audio.
+        let st = hidden_command(&ff)
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-err_detect", "crccheck+bitstream+explode", "-i"])
+            .arg(&path)
+            .args(["-f", "null", "-"])
+            .output()
+            .unwrap();
+        assert!(st.status.success() && st.stderr.is_empty(), "{bits} bit: decode errors: {}", String::from_utf8_lossy(&st.stderr));
+        let info = probe_source(&ff, &path).unwrap();
+        assert_eq!((info.channels, info.bits_per_sample), (Some(channels), Some(bits)));
+        let tags = read_source_tags(&ff, &path).unwrap();
+        assert!(tags.iter().any(|(k, v)| k == "artist" && v == "Artist"), "tags must be kept: {tags:?}");
+        if channels == 2 {
+            assert!(info.has_art(), "cover must be kept");
+        }
+        fs::remove_dir_all(d.0.join("out")).unwrap();
+    }
 }

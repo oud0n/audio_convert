@@ -104,6 +104,7 @@ export interface ConverterSettings {
   localSavePath: string; // Target directory path on Desktop
   maxSampleRate?: number; // 0 = no limit; higher source rates are reduced (also in "same as source")
   flacCompressionLevel?: number; // 0-8
+  flacUncompressed?: boolean; // FLAC without compression (overrides the level)
   onExisting?: 'rename' | 'overwrite' | 'skip'; // when the output file already exists
 }
 

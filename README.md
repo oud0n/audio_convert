@@ -54,7 +54,7 @@ npm run build
 ※ Tauri でビルドし、インストーラーは `src-tauri/target/release/bundle/` に生成されます。
 
 #### 同梱する FFmpeg
-`npm install` 時に `scripts/prepare-ffmpeg.mjs` が FFmpeg を `src-tauri/binaries/` にコピーし、アプリに同梱します（ライセンス文も同梱）。既定は `ffmpeg-static` のバイナリで、`FFMPEG_BUNDLE_SOURCE` で別のビルドを指定できます。リリースビルド（`node scripts/prepare-ffmpeg.mjs --release`）では、必要なエンコーダがない FFmpeg や `--enable-nonfree` でビルドされた（再配布できない）FFmpeg を拒否します。リリースでは全 OS で、`scripts/build-ffmpeg.sh` が公式ソース（ハッシュ固定）から LGPL 版の FFmpeg（LAME・Opus・Vorbis を静的リンク）をビルドして同梱します。GitHub Actions の `ffmpeg.yml` が macOS（Apple Silicon / Intel）・Linux・Windows（MSYS2）でこれをビルドし、テストとリリースで使います。ビルド結果はスクリプトのハッシュでキャッシュされ、スクリプトを変えたときだけ作り直されます。手元でも `scripts/build-ffmpeg.sh <作業フォルダ>` でビルドでき、最後の 2 行に出る `FFMPEG_BUNDLE_SOURCE` / `FFMPEG_BUNDLE_LICENSE` を指定して `node scripts/prepare-ffmpeg.mjs` を実行すると同梱されます。
+`npm install` 時に `scripts/prepare-ffmpeg.mjs` が FFmpeg を `src-tauri/binaries/` にコピーし、アプリに同梱します（ライセンス文も同梱）。既定は `ffmpeg-static` のバイナリで、`FFMPEG_BUNDLE_SOURCE` で別のビルドを指定できます。リリースビルド（`node scripts/prepare-ffmpeg.mjs --release`）では、必要なエンコーダがない FFmpeg や `--enable-nonfree` でビルドされた（再配布できない）FFmpeg を拒否します。リリースでは全 OS で、`scripts/build-ffmpeg.sh` が公式ソース（ハッシュ固定）から LGPL 版の FFmpeg（LAME・Opus・Vorbis・soxr を静的リンク）をビルドして同梱します。GitHub Actions の `ffmpeg.yml` が macOS（Apple Silicon / Intel）・Linux・Windows（MSYS2）でこれをビルドし、テストとリリースで使います。ビルド結果はスクリプトのハッシュでキャッシュされ、スクリプトを変えたときだけ作り直されます。手元でも `scripts/build-ffmpeg.sh <作業フォルダ>` でビルドでき、最後の 2 行に出る `FFMPEG_BUNDLE_SOURCE` / `FFMPEG_BUNDLE_LICENSE` を指定して `node scripts/prepare-ffmpeg.mjs` を実行すると同梱されます。
 
 ### 課題点・既知の制限事項
 
@@ -115,7 +115,7 @@ npm run build
 * Builds with Tauri; installers are written to `src-tauri/target/release/bundle/`.
 
 #### Bundled FFmpeg
-`npm install` runs `scripts/prepare-ffmpeg.mjs`, which copies FFmpeg to `src-tauri/binaries/` so it ships with the app (with its license text). The default is the `ffmpeg-static` binary; set `FFMPEG_BUNDLE_SOURCE` to use another build. Release builds (`node scripts/prepare-ffmpeg.mjs --release`) refuse an FFmpeg that lacks a required encoder or was built with `--enable-nonfree` (not redistributable). Releases on every platform bundle an LGPL FFmpeg built from the official, checksum-pinned sources by `scripts/build-ffmpeg.sh` (LAME, Opus and Vorbis linked statically). The GitHub Actions workflow `ffmpeg.yml` builds it on macOS (Apple Silicon and Intel), Linux and Windows (MSYS2) for the test and release workflows; builds are cached by the script's hash, so FFmpeg is rebuilt only when the script changes. To build it locally, run `scripts/build-ffmpeg.sh <work-dir>` and pass the `FFMPEG_BUNDLE_SOURCE` / `FFMPEG_BUNDLE_LICENSE` values from its last two lines to `node scripts/prepare-ffmpeg.mjs`.
+`npm install` runs `scripts/prepare-ffmpeg.mjs`, which copies FFmpeg to `src-tauri/binaries/` so it ships with the app (with its license text). The default is the `ffmpeg-static` binary; set `FFMPEG_BUNDLE_SOURCE` to use another build. Release builds (`node scripts/prepare-ffmpeg.mjs --release`) refuse an FFmpeg that lacks a required encoder or was built with `--enable-nonfree` (not redistributable). Releases on every platform bundle an LGPL FFmpeg built from the official, checksum-pinned sources by `scripts/build-ffmpeg.sh` (LAME, Opus, Vorbis and soxr linked statically). The GitHub Actions workflow `ffmpeg.yml` builds it on macOS (Apple Silicon and Intel), Linux and Windows (MSYS2) for the test and release workflows; builds are cached by the script's hash, so FFmpeg is rebuilt only when the script changes. To build it locally, run `scripts/build-ffmpeg.sh <work-dir>` and pass the `FFMPEG_BUNDLE_SOURCE` / `FFMPEG_BUNDLE_LICENSE` values from its last two lines to `node scripts/prepare-ffmpeg.mjs`.
 
 ### Known Limitations
 
@@ -130,7 +130,7 @@ npm run build
 - WAVのテキストタグはUnicode対応のID3v2.3として保存します。
 - 保存はFFmpegで一元処理し、ブラウザの音声バッファは出力生成に使用しません。プレビューは保存された出力から生成します。
 - ピーク正規化を有効にした場合はピーク目標値を優先し、手動音量変更は適用しません。無音トリムは先頭・末尾を対象とします。
-- 出力名のみNFC正規化し、Windows禁止文字・予約名・長すぎる名前を処理します。入力パスは変更しません。同名ファイルがある場合は、設定に応じて連番を付ける・上書きする・スキップするのいずれかを行います（既定は連番）。
+- 出力名のみNFC正規化し、Windows禁止文字・予約名・長すぎる名前を処理します。入力パスは変更しません。同名ファイルがある場合は、設定に応じて連番を付ける（`名前_2`、`名前_3`…）・上書きする・スキップするのいずれかを行います（既定は連番）。サンプルレートの変換には soxr（最高品質設定）を使います。FLAC は圧縮レベル 0〜8 のほか、非圧縮（全サブフレームが VERBATIM）でも書き出せます。
 - 完成した出力を同じ保存先の一時ファイルからハードリンクで確定します。FAT/exFAT等のハードリンク非対応の保存先では排他的に新規ファイルを作成し、コピー失敗時には削除します。「上書き」を選んだ場合のみ既存出力を置き換えます。元ファイル自身は上書きしません。
 - PCM完全一致は、元の精度を保持したfloat64 PCMのSHA-256とサンプルレート・チャンネル数・PCMバイト数で判断します。これはコンテナやタグを含むファイル全体の一致ではありません。
 - 音声構成が異なる場合は完全一致とせず、波形比較は実行しません。ハッシュ・波形解析失敗は検証失敗として扱います。
@@ -140,4 +140,4 @@ npm run build
 - キャンセルは実行中のFFmpeg（正規化解析・変換・プレビュー・自動検証）を停止し、停止完了まで新しいバッチを開始しません。保存確定済みの出力は保持します。元ファイルのゴミ箱移動を既にOSへ依頼した場合、その操作は取り消せません。
 - 正規化解析と変換の進捗はFFmpegの処理時刻から表示します。バッチ終了通知は成功・失敗・要確認の件数を表示します。
 
-The native FFmpeg pipeline applies conversion settings, preserves supported source precision, and previews the saved output. Output names retain Unicode while sanitizing Windows restrictions. When the output name exists, the file gets a number, replaces it, or is skipped, as set (default: number); the source file itself is never replaced. Publication uses hard links with an exclusive-copy fallback for FAT/exFAT. Exact PCM verification uses float64 PCM SHA-256 plus audio structure and decoded byte count. Failed analysis never passes verification. Optional source trashing is withheld when enabled automatic verification fails or reports warning/degraded.
+The native FFmpeg pipeline applies conversion settings, preserves supported source precision, and previews the saved output. Output names retain Unicode while sanitizing Windows restrictions. When the output name exists, the file gets a number (`name_2`, `name_3`, ...), replaces it, or is skipped, as set (default: number); the source file itself is never replaced. Sample rates are converted with soxr at its highest quality. FLAC can be written at levels 0-8 or uncompressed (every subframe VERBATIM). Publication uses hard links with an exclusive-copy fallback for FAT/exFAT. Exact PCM verification uses float64 PCM SHA-256 plus audio structure and decoded byte count. Failed analysis never passes verification. Optional source trashing is withheld when enabled automatic verification fails or reports warning/degraded.

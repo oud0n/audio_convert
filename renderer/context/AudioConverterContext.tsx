@@ -67,6 +67,7 @@ const defaultSettings: ConverterSettings = {
   localSavePath: '~/Music/Audio-Convert-Outputs',
   maxSampleRate: 0,
   flacCompressionLevel: 5,
+  flacUncompressed: false,
   onExisting: 'rename',
 };
 
@@ -730,7 +731,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     const job = { id: crypto.randomUUID(), cancelled: false };
     jobRef.current = job;
     // Set once the output file exists on disk, so a later failure or cancel does not
-    // report a saved file as failed (a retry would then create "name (1).ext").
+    // report a saved file as failed (a retry would then create "name_2.ext").
     let publishedPath = '';
     let publishedName = '';
     let trashedOriginal = false;

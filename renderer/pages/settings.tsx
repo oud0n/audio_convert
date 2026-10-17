@@ -446,8 +446,13 @@ export default function SettingsPage() {
                   <label className="text-xs text-zinc-400 font-mono">FLAC COMPRESSION</label>
                   <select
                     disabled={(settings.outputFormat || '').toUpperCase() !== 'FLAC'}
-                    value={settings.flacCompressionLevel ?? 5}
-                    onChange={(e) => updateSetting('flacCompressionLevel', parseInt(e.target.value))}
+                    value={settings.flacUncompressed ? 'uncompressed' : String(settings.flacCompressionLevel ?? 5)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setSettings((prev) => v === 'uncompressed'
+                        ? { ...prev, flacUncompressed: true }
+                        : { ...prev, flacUncompressed: false, flacCompressionLevel: parseInt(v) });
+                    }}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
                   >
                     {[0, 1, 2, 3, 4, 5, 6, 7, 8].map((level) => (
@@ -455,6 +460,7 @@ export default function SettingsPage() {
                         {level}{level === 0 ? ' (fastest)' : level === 5 ? ' (default)' : level === 8 ? ' (smallest)' : ''}
                       </option>
                     ))}
+                    <option value="uncompressed">Uncompressed (no compression)</option>
                   </select>
                 </div>
                 <div className="space-y-1.5">
@@ -464,7 +470,7 @@ export default function SettingsPage() {
                     onChange={(e) => updateSetting('onExisting', e.target.value as any)}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
                   >
-                    <option value="rename">Add a number</option>
+                    <option value="rename">Add a number (name_2)</option>
                     <option value="overwrite">Overwrite</option>
                     <option value="skip">Skip</option>
                   </select>

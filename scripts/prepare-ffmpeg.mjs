@@ -66,6 +66,8 @@ function main() {
   }
   const missing = REQUIRED_ENCODERS.filter(name => !new RegExp(`^\\s*A\\S*\\s+${name}\\s`, 'm').test(encoders));
   if (missing.length) problem(`${source} lacks encoders: ${missing.join(', ')}`);
+  // Sample rate conversion uses soxr when present; releases must have it.
+  if (!/--enable-libsoxr/.test(version)) problem(`${source} was built without libsoxr (high-quality resampler)`);
   if (/--enable-nonfree/.test(version)) {
     problem(`${source} was built with --enable-nonfree and may not be redistributed; set FFMPEG_BUNDLE_SOURCE to a GPL/LGPL build`);
   }

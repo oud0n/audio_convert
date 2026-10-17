@@ -41,7 +41,7 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm zlib1g-dev
+          sudo apt-get install -y nasm cmake zlib1g-dev
 
       - name: Set up MSYS2 (Windows)
         if: runner.os == 'Windows'
@@ -52,6 +52,7 @@ jobs:
           install: >-
             make diffutils tar curl
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-nasm
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-zlib

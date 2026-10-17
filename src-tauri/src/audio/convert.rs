@@ -54,6 +54,9 @@ pub struct ConverterSettings {
     /// FLAC compression level 0-12 (None = FFmpeg's default, 5).
     #[serde(rename = "flacCompressionLevel")]
     pub flac_compression_level: Option<u32>,
+    /// Write FLAC without compression (every subframe VERBATIM).
+    #[serde(rename = "flacUncompressed")]
+    pub flac_uncompressed: Option<bool>,
     /// What to do when the output file already exists: "rename" (default), "overwrite", "skip".
     #[serde(rename = "onExisting")]
     pub on_existing: Option<String>,
@@ -602,8 +605,7 @@ pub fn pre_gain_filters(format: OutFormat, settings: &ConverterSettings, source:
         }
     }
     if let Some(sr) = rate.filter(|&sr| Some(sr) != source.sample_rate) {
-        // Higher-quality settings than the default resampler (longer filter, steeper cutoff).
-        filters.push(format!("aresample={sr}:filter_size=64:phase_shift=10:cutoff=0.97"));
+        filters.push(resample_filter(sr));
     }
     let mut constraints = Vec::new();
     // Lossy encoders only accept standard layouts, so always name one for them. Lossless
@@ -615,6 +617,27 @@ pub fn pre_gain_filters(format: OutFormat, settings: &ConverterSettings, source:
         filters.push(format!("aformat={}", constraints.join(":")));
     }
     filters
+}
+
+/// True when the FFmpeg in use has the SoX resampler (the bundled build does).
+fn soxr_available() -> bool {
+    static SOXR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SOXR.get_or_init(|| {
+        hidden_command(&get_ffmpeg_executable())
+            .args(["-hide_banner", "-version"])
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("--enable-libsoxr"))
+    })
+}
+
+/// Sample rate conversion. soxr at very high quality (precision 28 bit, i.e. SoX "VHQ")
+/// when available, else FFmpeg's own resampler with a longer filter and steeper cutoff.
+pub fn resample_filter(rate: u32) -> String {
+    if soxr_available() {
+        format!("aresample={rate}:resampler=soxr:precision=28")
+    } else {
+        format!("aresample={rate}:filter_size=64:phase_shift=10:cutoff=0.97")
+    }
 }
 
 /// Builds the FFmpeg command for the main encode. `gain_db` is the volume change to
@@ -1249,7 +1272,8 @@ fn publish_output(staging: &Path, destination: &Path) -> std::io::Result<()> {
 fn publish_unique(staging: &Path, dir: &Path, stem: &str, ext: &str, ctx: &JobCtx) -> Result<PathBuf, String> {
     for i in 0..10000 {
         ctx.check()?;
-        let name = if i == 0 { format!("{stem}.{ext}") } else { format!("{stem} ({i}).{ext}") };
+        // name.ext, then name_2.ext, name_3.ext, ...
+        let name = if i == 0 { format!("{stem}.{ext}") } else { format!("{stem}_{}.{ext}", i + 1) };
         let destination = dir.join(name);
         match publish_output(staging, &destination) {
             Ok(()) => return Ok(destination),
@@ -1423,6 +1447,25 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
     if format == OutFormat::Wav {
         append_wav_tags(&temp_output, &tags)?;
     }
+    if format == OutFormat::Flac && settings.flac_uncompressed.unwrap_or(false) {
+        ctx.emit("converting", 99.0);
+        let pcm = work.0.join("output.s32");
+        let args: Vec<String> = vec![
+            "-i".into(),
+            temp_output.to_string_lossy().into_owned(),
+            "-map".into(),
+            "0:a:0".into(),
+            "-c:a".into(),
+            "pcm_s32le".into(),
+            "-f".into(),
+            "s32le".into(),
+            pcm.to_string_lossy().into_owned(),
+        ];
+        run_ffmpeg(ctx, &ffmpeg, &args, 0.0, "converting")?;
+        ctx.check()?;
+        flac_verbatim::rewrite_verbatim(&temp_output, &pcm).map_err(|e| format!("Cannot write uncompressed FLAC: {e}"))?;
+        let _ = fs::remove_file(&pcm);
+    }
 
     // In "same as source" mode a lossless output must have exactly the planned
     // rate (the source's, or the capped one), channels and bit depth.
@@ -1588,6 +1631,8 @@ pub async fn move_output_into_place(from: String, to: String) -> ConvertResponse
         Err(e) => ConvertResponse::failure(e),
     }
 }
+
+mod flac_verbatim;
 
 #[cfg(test)]
 mod tests;
