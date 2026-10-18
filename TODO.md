@@ -32,17 +32,7 @@
 
 ## 2. メモリ・パフォーマンス・コード整理 (Optimization & Cleanup)
 
-- [ ] **[High] レンダラープロセスの AudioBuffer メモリ枯渇 (OOM) 対策**
-  - ファイル: `renderer/context/AudioConverterContext.tsx`
-  - 内容: 全ファイルの非圧縮 PCM `AudioBuffer` を常時オンメモリ保持する構成を見直し、選択中ファイルのみオンデマンド読み込み、または波形ピークのみキャッシュする設計へ改修する。
-- [ ] **[Medium] ファイルドロップ時の並列度制御 (Concurrency Limiting)**
-  - ファイル: `renderer/context/AudioConverterContext.tsx` (`handleAddFiles`)
-  - 内容: `Promise.all` による無制限の同時デコードを廃止し、ワーカー数（例: 最大4〜8並列）でキューイング処理する。
-- [ ] **[Medium] 元ファイル削除 (Trash) の安全ガード強化**
-  - ファイル: `renderer/context/AudioConverterContext.tsx`
-  - 内容: `autoVerifyQuality: false` 時であっても出力ファイルの存在・最小サイズ・再生可能性を確認してから安全にゴミ箱へ移動する。
-- [ ] **[Low] 未使用コード・重複コードの整理**
-  - `renderer/utils/audioEncoder.ts` 内の未使用関数 `bufferToWav` の削除。
+（すべて対応済み。2026-10-18）
 
 ---
 
