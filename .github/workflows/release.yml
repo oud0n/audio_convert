@@ -12,9 +12,12 @@ jobs:
   ffmpeg:
     uses: ./.github/workflows/ffmpeg.yml
 
+  sox:
+    uses: ./.github/workflows/sox.yml
+
   build-and-release:
     name: Build on ${{ matrix.os }}
-    needs: ffmpeg
+    needs: [ffmpeg, sox]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -66,6 +69,19 @@ jobs:
       # with --enable-nonfree.
       - name: Prepare bundled FFmpeg
         run: node scripts/prepare-ffmpeg.mjs --release
+
+      # SoX with DSD support (sox-dsd) for PCM -> DSD, built by sox.yml.
+      - uses: actions/download-artifact@v4
+        with:
+          name: sox-${{ matrix.ffmpeg }}
+          path: ${{ runner.temp }}/sox
+
+      - name: Prepare bundled SoX
+        shell: bash
+        run: |
+          bin="$(ls "$RUNNER_TEMP"/sox/bin/sox*)"
+          chmod +x "$bin"
+          SOX_BUNDLE_SOURCE="$bin" SOX_BUNDLE_LICENSE="$RUNNER_TEMP/sox/SOX-LICENSE.txt" node scripts/prepare-sox.mjs --release
 
       - name: Build app
         run: npm run build

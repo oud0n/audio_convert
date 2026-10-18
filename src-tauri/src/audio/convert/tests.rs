@@ -32,6 +32,8 @@ fn settings(keep: bool) -> ConverterSettings {
         cover_format: None,
         save_cover_file: None,
         dop: None,
+        dsd_rate: None,
+        dsd_filter: None,
         tempo_enabled: None,
         tempo_from: None,
         tempo_to: None,
@@ -784,11 +786,6 @@ fn dsd_sources_convert_to_pcm_dsf_and_dop() {
     assert_eq!(dsd::dop_matches(&odd_dff, &dop_odd, &|| false).unwrap(), Some(true));
     assert_eq!(dsd::dop_matches(&dsf, &dop_odd, &|| false).unwrap(), Some(false), "the source has more bits");
 
-    // PCM sources cannot become DSD.
-    let wav = d.0.join("a.wav");
-    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=0.2", wav.to_str().unwrap()]);
-    let err = convert_blocking(&ctx(), &request(&wav, &out, "DSF", "no")).unwrap_err();
-    assert!(err.contains("DSD source"), "{err}");
 }
 
 #[test]
@@ -1021,6 +1018,74 @@ fn very_short_sources_convert_to_every_format() {
 }
 
 #[test]
+fn sox_dsd_arguments_and_progress() {
+    let args = dsd::sox_dsd_args(44100, 2, 64, "sdm-8", Path::new("o.dsf"));
+    let line = args.join(" ");
+    assert!(line.contains("-r 44100 -c 2 -"), "{line}");
+    assert!(line.ends_with("-t dsf o.dsf rate -v 2822400 sdm -f sdm-8"), "{line}");
+    assert!(dsd::sox_dsd_args(96000, 1, 256, "clans-6", Path::new("o.dsf")).join(" ").ends_with("rate -v 11289600 sdm -f clans-6"));
+    // Unknown values fall back to DSD64 / sdm-8.
+    assert!(dsd::sox_dsd_args(44100, 2, 7, "bogus; rm", Path::new("o.dsf")).join(" ").ends_with("rate -v 2822400 sdm -f sdm-8"));
+    assert_eq!(dsd::sox_progress("\rIn:3.20% 00:00:01.00 [00:00:30.00] Out:0\rIn:45.67% 00:00:02"), Some(45.67));
+    assert_eq!(dsd::sox_progress("nothing"), None);
+}
+
+/// SoX-dependent tests skip when SoX is missing, except with REQUIRE_FFMPEG (CI).
+fn sox_available() -> bool {
+    let ok = hidden_command(&crate::audio::audit::get_sox_executable()).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+    if !ok && std::env::var_os("REQUIRE_FFMPEG").is_some() {
+        panic!("SoX is required but {} does not run", crate::audio::audit::get_sox_executable().display());
+    }
+    ok
+}
+
+#[test]
+fn pcm_sources_become_dsd() {
+    if !ffmpeg_available() || !sox_available() {
+        eprintln!("skipped: ffmpeg or sox not found");
+        return;
+    }
+    let d = temp_dir();
+    let ff = get_ffmpeg_executable();
+    let src = d.0.join("tone.flac");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=44100:duration=2", "-ac", "2", "-c:a", "flac", "-metadata", "title=PCM Tone", "-metadata", "artist=Band", src.to_str().unwrap()]);
+    let out = d.0.join("out");
+
+    let (dsf, name) = convert_blocking(&ctx(), &request(&src, &out, "DSF", "tone")).unwrap();
+    assert_eq!(name, "tone.dsf");
+    let info = probe_source(&ff, &dsf).unwrap();
+    assert!(dsd::is_dsd_codec(info.codec.as_deref()), "{:?}", info.codec);
+    assert_eq!((info.sample_rate, info.channels), (Some(352800), Some(2)), "DSD64 decodes at 352.8 kHz");
+    assert!((info.duration - 2.0).abs() < 0.05, "{}", info.duration);
+    let tags = read_source_tags(&ff, &dsf).unwrap();
+    assert!(tags.iter().any(|(k, v)| k == "title" && v == "PCM Tone"), "{tags:?}");
+    let (ch, rate, _) = dsd_bits(&dsf);
+    assert_eq!((ch, rate), (2, 2_822_400));
+    // The quality check compares at the source rate: a clean conversion is not degraded.
+    let r = crate::audio::audit::verify_quality_blocking(&src.to_string_lossy(), &dsf.to_string_lossy(), false, &|| false).result.unwrap();
+    assert_ne!(r.status, "degraded", "{} {:?}", r.summary_message, r.details);
+    assert!(r.correlation_percent.unwrap() > 99.0, "{:?}", r.correlation_percent);
+
+    // DSD128 with another filter, a track range, mono.
+    let mut req = request(&src, &out, "DSF", "x128");
+    req.settings.dsd_rate = Some(128);
+    req.settings.dsd_filter = Some("clans-6".into());
+    req.start_seconds = Some(0.5);
+    req.end_seconds = Some(1.5);
+    req.channel = Some(0);
+    let (dsf128, _) = convert_blocking(&ctx(), &req).unwrap();
+    let info = probe_source(&ff, &dsf128).unwrap();
+    assert_eq!((info.sample_rate, info.channels), (Some(705600), Some(1)));
+    assert!((info.duration - 1.0).abs() < 0.05, "{}", info.duration);
+
+    // More channels than DSF holds.
+    let eight = d.0.join("eight.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=0.3", "-af", "aformat=channel_layouts=7.1", eight.to_str().unwrap()]);
+    let err = convert_blocking(&ctx(), &request(&eight, &out, "DSF", "eight")).unwrap_err();
+    assert!(err.contains("at most 6 channels"), "{err}");
+}
+
+#[test]
 fn hi_res_source_to_mp3_and_opus_succeeds() {
     if !ffmpeg_available() {
         return;
@@ -1227,6 +1292,30 @@ fn cancelling_a_running_conversion_stops_it_quickly() {
     let started = std::time::Instant::now();
     let handle = std::thread::spawn(move || convert_blocking(&c, &req));
     std::thread::sleep(std::time::Duration::from_millis(400));
+    jobs.lock().unwrap().remove("j");
+    let err = handle.join().unwrap().unwrap_err();
+    assert!(err.contains("cancelled"), "{err}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+    assert_eq!(fs::read_dir(&out).map(|r| r.count()).unwrap_or(0), 0, "nothing published");
+}
+
+#[test]
+fn cancelling_pcm_to_dsd_stops_both_programs() {
+    if !ffmpeg_available() || !sox_available() {
+        return;
+    }
+    let d = temp_dir();
+    let src = d.0.join("long.flac");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=120:sample_rate=44100", "-ac", "2", "-c:a", "flac", src.to_str().unwrap()]);
+    let jobs: ActiveJobs = Arc::new(Mutex::new(HashMap::new()));
+    jobs.lock().unwrap().insert("j".into(), 0);
+    let c = JobCtx { app: None, jobs: jobs.clone(), job_id: Some("j".into()) };
+    let out = d.0.join("out");
+    let mut req = request(&src, &out, "DSF", "x");
+    req.settings.dsd_rate = Some(256);
+    let started = std::time::Instant::now();
+    let handle = std::thread::spawn(move || convert_blocking(&c, &req));
+    std::thread::sleep(std::time::Duration::from_millis(600));
     jobs.lock().unwrap().remove("j");
     let err = handle.join().unwrap().unwrap_err();
     assert!(err.contains("cancelled"), "{err}");

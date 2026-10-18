@@ -91,6 +91,12 @@ pub struct ConverterSettings {
     pub save_cover_file: Option<bool>,
     /// DSD sources to FLAC / WAV / AIFF as DoP (the DSD bits packed in 24-bit PCM).
     pub dop: Option<bool>,
+    /// PCM -> DSD: the DSD rate as a multiple of 44.1 kHz (64, 128 or 256; default 64).
+    #[serde(rename = "dsdRate")]
+    pub dsd_rate: Option<u32>,
+    /// PCM -> DSD: sox-dsd's noise-shaping filter (sdm-4..8, clans-4..8; default sdm-8).
+    #[serde(rename = "dsdFilter")]
+    pub dsd_filter: Option<String>,
     /// Tempo change keeping the pitch (xrecode tempo "by values"): the speed becomes
     /// tempoTo / tempoFrom, e.g. 25 -> 23.976 for PAL speed-up.
     #[serde(rename = "tempoEnabled")]
@@ -1297,7 +1303,7 @@ pub fn build_encode_args(
         OutFormat::Opus => "libopus",
         OutFormat::Ac3 => "ac3",
         OutFormat::Wma => "wmav2",
-        OutFormat::Dsf => return Err("DSF output needs a DSD source (PCM cannot be turned into DSD)".into()),
+        OutFormat::Dsf => return Err("DSF is written by SoX, not by an FFmpeg encoder".into()),
     };
     let vbr = vbr_args(format, settings, format == OutFormat::M4a && aac_at_available());
     let codec = vbr.as_ref().map_or(codec, |(c, _)| *c);
@@ -2078,10 +2084,10 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
     // channels) applies to the bit stream.
     let dsd_source = dsd::is_dsd_codec(source.codec.as_deref());
     let dop = dsd_source && settings.dop.unwrap_or(false) && matches!(format, OutFormat::Flac | OutFormat::Wav | OutFormat::Aiff);
-    if action.is_none() && format == OutFormat::Dsf && !dsd_source {
-        return Err("DSF output needs a DSD source (PCM cannot be turned into DSD)".into());
-    }
-    let dsd_copy = action.is_none() && (format == OutFormat::Dsf || dop);
+    // PCM to DSD: FFmpeg decodes (with the usual cut, channels and effects), SoX
+    // modulates.
+    let pcm_to_dsd = action.is_none() && format == OutFormat::Dsf && !dsd_source;
+    let dsd_copy = action.is_none() && ((format == OutFormat::Dsf && dsd_source) || dop);
     if dsd_copy && (range.is_some() || channel.is_some()) {
         return Err("Tracks or single channels of DSD can only be converted to PCM".into());
     }
@@ -2135,6 +2141,15 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
             args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into(), temp_output.to_string_lossy().into_owned()]);
             run_ffmpeg(ctx, &ffmpeg, &args, source.duration, "converting")?;
         }
+        None
+    } else if pcm_to_dsd {
+        let modulated = work.0.join("sox.dsf");
+        dsd::pcm_to_dsf(ctx, &ffmpeg, &input, settings, &source, gain_db, &modulated)?;
+        ctx.check()?;
+        // The same bits again, with the tags.
+        let mut reader = dsd::DsdReader::open(&modulated)?;
+        let cancelled = || ctx.cancelled();
+        dsd::write_dsf(&mut reader, &temp_output, &tags_for_output(&tags, false), &cancelled)?;
         None
     } else if dsd_copy {
         ctx.emit("converting", 0.0);

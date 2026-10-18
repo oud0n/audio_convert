@@ -38,39 +38,59 @@ pub struct VerifyQualityResponse {
     pub error: Option<String>,
 }
 
-/// FFmpeg to use, in order: $FFMPEG_PATH, the sidecar bundled next to the app
-/// executable, the npm ffmpeg-static binary (development), then `ffmpeg` on PATH.
-pub fn get_ffmpeg_executable() -> PathBuf {
-    if let Some(p) = std::env::var_os("FFMPEG_PATH").filter(|p| !p.is_empty()) {
-        return PathBuf::from(p);
-    }
+/// A bundled helper program: the sidecar next to the app executable (Tauri installs it
+/// without the target triple), or in development builds the one prepared for bundling in
+/// src-tauri/binaries (`audio-convert-<tool>-<target>`).
+fn bundled_program(tool: &str) -> Option<PathBuf> {
     let exe = if cfg!(windows) { ".exe" } else { "" };
-    // Tauri installs the sidecar next to the app executable without the target triple.
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-        let sidecar = dir.join(format!("audio-convert-ffmpeg{exe}"));
+        let sidecar = dir.join(format!("audio-convert-{tool}{exe}"));
         if sidecar.is_file() {
-            return sidecar;
+            return Some(sidecar);
         }
     }
-    // Development builds and tests: the FFmpeg prepared for bundling (the one users get),
-    // before the npm ffmpeg-static (an older FFmpeg that behaves differently).
     #[cfg(debug_assertions)]
     {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
         if let Ok(entries) = std::fs::read_dir(&dir) {
+            let prefix = format!("audio-convert-{tool}-{}", std::env::consts::ARCH);
             let mut found: Vec<PathBuf> = entries
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| {
                     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    name.starts_with(&format!("audio-convert-ffmpeg-{}", std::env::consts::ARCH)) && (exe.is_empty() || name.ends_with(exe)) && !name.ends_with(".txt")
+                    name.starts_with(&prefix) && (exe.is_empty() || name.ends_with(exe)) && !name.ends_with(".txt")
                 })
                 .collect();
             found.sort();
             if let Some(p) = found.into_iter().next() {
-                return p;
+                return Some(p);
             }
         }
     }
+    None
+}
+
+/// SoX with DSD support (sox-dsd), for PCM -> DSD: $SOX_PATH, the bundled sidecar, then
+/// `sox` on PATH.
+pub fn get_sox_executable() -> PathBuf {
+    if let Some(p) = std::env::var_os("SOX_PATH").filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
+    bundled_program("sox").unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "sox.exe" } else { "sox" }))
+}
+
+/// FFmpeg to use, in order: $FFMPEG_PATH, the bundled sidecar, the npm ffmpeg-static
+/// binary (development), then `ffmpeg` on PATH.
+pub fn get_ffmpeg_executable() -> PathBuf {
+    if let Some(p) = std::env::var_os("FFMPEG_PATH").filter(|p| !p.is_empty()) {
+        return PathBuf::from(p);
+    }
+    // The bundled FFmpeg (the one users get) comes before the npm ffmpeg-static, an older
+    // FFmpeg that behaves differently.
+    if let Some(p) = bundled_program("ffmpeg") {
+        return p;
+    }
+    let exe = if cfg!(windows) { ".exe" } else { "" };
     let name = format!("ffmpeg{exe}");
     for base in ["node_modules", "../node_modules"] {
         let local = Path::new(base).join("ffmpeg-static").join(&name);
@@ -343,6 +363,41 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 /// Streams both files (the original remixed / resampled to the converted file's channel
 /// count and rate) and compares them sample by sample. The first 250 frames are left
 /// out when there is more (encoder start-up), as before.
+/// The delay (in samples at `rate`) of `converted` against `original`, found by
+/// cross-correlating the first two seconds of the first channel (within +-64 samples).
+fn best_lag(original: &str, converted: &str, original_filters: Option<&str>, converted_filters: Option<&str>, rate: Option<u32>) -> i64 {
+    let rate = rate.unwrap_or(44100);
+    let decode = |path: &str, filters: Option<&str>| -> Vec<f32> {
+        let mut chain: Vec<String> = filters.map(str::to_string).into_iter().collect();
+        chain.push(format!("aresample={rate}"));
+        chain.push("pan=mono|c0=c0".into());
+        let out = crate::audio::convert::hidden_command(&get_ffmpeg_executable())
+            .args(["-v", "error", "-nostdin", "-i", path, "-map", "0:a:0", "-af", &chain.join(","), "-t", "2", "-c:a", "pcm_f32le", "-f", "f32le", "-"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        out.map(|o| o.stdout.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()).unwrap_or_default()
+    };
+    let a = decode(original, original_filters);
+    let b = decode(converted, converted_filters);
+    const MAX: i64 = 64;
+    let n = a.len().min(b.len()) as i64;
+    if n < 4 * MAX {
+        return 0;
+    }
+    let mut best = (0i64, f64::MIN);
+    for lag in -MAX..=MAX {
+        let mut sum = 0.0f64;
+        for i in MAX..n - MAX {
+            sum += f64::from(a[i as usize]) * f64::from(b[(i + lag) as usize]);
+        }
+        if sum > best.1 {
+            best = (lag, sum);
+        }
+    }
+    best.0
+}
+
 fn compare_files(
     original: &str,
     converted: &str,
@@ -355,10 +410,37 @@ fn compare_files(
     let channels = out.channels.unwrap_or(2).max(1) as usize;
     let src_channels = if channel.is_some() { Some(1) } else { src.channels };
     let remix = out.channels.filter(|c| src_channels != Some(*c));
-    let resample = out.sample_rate.filter(|r| src.sample_rate != Some(*r));
+    // PCM made into DSD: the DSD (decoded with its ultrasonic shaped noise) is brought
+    // back to the source's rate, which also filters that noise away, and compared there.
+    let dsd_from_pcm = crate::audio::convert::dsd::is_dsd_codec(out.codec.as_deref())
+        && !crate::audio::convert::dsd::is_dsd_codec(src.codec.as_deref());
+    let compare_rate = if dsd_from_pcm { src.sample_rate } else { out.sample_rate };
+    let resample = if dsd_from_pcm { None } else { out.sample_rate.filter(|r| src.sample_rate != Some(*r)) };
+    let converted_resample = if dsd_from_pcm { src.sample_rate } else { None };
+    // DSD's shaped noise rises right above the audio band at nearly full scale: both sides
+    // get the same steep low-pass (8 poles at 20 kHz) so only the music is compared, and
+    // the DSD's 50 % modulation (SACD level, -6 dB decoded) is brought back to full.
+    let band = if dsd_from_pcm { Some("lowpass=f=20000,lowpass=f=20000,lowpass=f=20000,lowpass=f=20000".to_string()) } else { None };
     let trim = Some(part_filters(range, channel, src.sample_rate).join(",")).filter(|f| !f.is_empty());
+    let trim = match (trim, &band) {
+        (Some(t), Some(b)) => Some(format!("{t},{b}")),
+        (t, b) => t.or(b.clone()),
+    };
+    let mut converted_filters = band.map(|b| format!("{b},volume=6.0206dB"));
+    let mut trim = trim;
+    if dsd_from_pcm {
+        // The modulator and the DSD decoder delay the audio by a few samples: align the
+        // two before comparing them sample by sample.
+        let lag = best_lag(original, converted, trim.as_deref(), converted_filters.as_deref(), compare_rate);
+        if lag > 0 {
+            let f = converted_filters.take().unwrap_or_default();
+            converted_filters = Some(format!("{f},aresample={},atrim=start_sample={lag},asetpts=N/SR/TB", compare_rate.unwrap_or(44100)));
+        } else if lag < 0 {
+            trim = Some(format!("{},atrim=start_sample={},asetpts=N/SR/TB", trim.unwrap_or_else(|| "anull".into()), -lag));
+        }
+    }
     let mut a = spawn_f32_decoder(original, remix, resample, trim)?;
-    let mut b = match spawn_f32_decoder(converted, None, None, None) {
+    let mut b = match spawn_f32_decoder(converted, None, converted_resample, converted_filters) {
         Ok(b) => b,
         Err(e) => {
             let _ = a.kill();
@@ -401,7 +483,7 @@ fn compare_files(
         total_a += std::io::copy(&mut ra, &mut std::io::sink())?;
         total_b += std::io::copy(&mut rb, &mut std::io::sink())?;
         let mut metrics = if body.count > 0.0 { body.finish() } else { all.finish() }?;
-        let rate = f64::from(out.sample_rate.unwrap_or(48000).max(1));
+        let rate = f64::from(compare_rate.unwrap_or(48000).max(1));
         metrics.length_diff_seconds = (total_b as f64 - total_a as f64) / frame as f64 / rate;
         Ok(metrics)
     })();

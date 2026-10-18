@@ -138,6 +138,8 @@ export interface ConverterSettings {
   coverFormat?: 'keep' | 'jpeg' | 'png';
   saveCoverFile?: boolean; // also save folder.jpg next to the output
   dop?: boolean; // DSD sources to FLAC / WAV / AIFF as DoP (DSD over PCM)
+  dsdRate?: 64 | 128 | 256; // PCM -> DSD (DSF): DSD64 / DSD128 / DSD256
+  dsdFilter?: string; // PCM -> DSD: sox-dsd noise-shaping filter (sdm-4..8, clans-4..8)
   tempoEnabled?: boolean; // tempo change keeping the pitch: speed = tempoTo / tempoFrom
   tempoFrom?: number;
   tempoTo?: number;

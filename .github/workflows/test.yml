@@ -33,9 +33,12 @@ jobs:
   ffmpeg:
     uses: ./.github/workflows/ffmpeg.yml
 
+  sox:
+    uses: ./.github/workflows/sox.yml
+
   rust:
-    # Converter tests run real conversions with the FFmpeg that ships with the app.
-    needs: ffmpeg
+    # Converter tests run real conversions with the FFmpeg and SoX that ship with the app.
+    needs: [ffmpeg, sox]
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +70,20 @@ jobs:
           echo "FFMPEG_BUNDLE_SOURCE=$bin" >> "$GITHUB_ENV"
           echo "FFMPEG_BUNDLE_LICENSE=$RUNNER_TEMP/ffmpeg/FFMPEG-LICENSE.txt" >> "$GITHUB_ENV"
           echo "FFMPEG_PATH=$bin" >> "$GITHUB_ENV"
-      # postinstall copies FFMPEG_BUNDLE_SOURCE to src-tauri/binaries (the Tauri build needs it).
+      - uses: actions/download-artifact@v4
+        with:
+          name: sox-${{ matrix.ffmpeg }}
+          path: ${{ runner.temp }}/sox
+      - name: Use the built SoX
+        shell: bash
+        run: |
+          bin="$(ls "$RUNNER_TEMP"/sox/bin/sox*)"
+          chmod +x "$bin"
+          echo "SOX_BUNDLE_SOURCE=$bin" >> "$GITHUB_ENV"
+          echo "SOX_BUNDLE_LICENSE=$RUNNER_TEMP/sox/SOX-LICENSE.txt" >> "$GITHUB_ENV"
+          echo "SOX_PATH=$bin" >> "$GITHUB_ENV"
+      # postinstall copies FFMPEG_BUNDLE_SOURCE and SOX_BUNDLE_SOURCE to src-tauri/binaries
+      # (the Tauri build needs them).
       - run: npm ci
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

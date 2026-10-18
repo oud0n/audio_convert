@@ -39,10 +39,12 @@
       "debugApplicationIdSuffix": ".debug"
     },
     "externalBin": [
-      "binaries/audio-convert-ffmpeg"
+      "binaries/audio-convert-ffmpeg",
+      "binaries/audio-convert-sox"
     ],
     "resources": {
-      "binaries/ffmpeg-LICENSE.txt": "licenses/ffmpeg-LICENSE.txt"
+      "binaries/ffmpeg-LICENSE.txt": "licenses/ffmpeg-LICENSE.txt",
+      "binaries/sox-LICENSE.txt": "licenses/sox-LICENSE.txt"
     }
   }
 }

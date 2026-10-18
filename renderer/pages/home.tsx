@@ -1005,6 +1005,9 @@ export default function HomeDashboardPage() {
                           ? (file.sourceSampleRate ?? file.sampleRate) / 2
                           : settings.actionMode === 'extract' || settings.actionMode === 'copy'
                           ? (file.sourceSampleRate ?? file.sampleRate)
+                          // DSF: the DSD rate (a DSD source decodes at 1/8 of it).
+                          : (file.outputFormat || settings.outputFormat).toUpperCase() === 'DSF'
+                          ? ((file.sourceCodec ?? '').startsWith('dsd_') ? (file.sourceSampleRate ?? file.sampleRate) * 8 : 44100 * (settings.dsdRate ?? 64))
                           : outputSampleRate(file.sourceSampleRate ?? file.sampleRate, settings, file.outputFormat || settings.outputFormat)) / 1000).toFixed(1)} kHz</td>
 
                         {/* Bitrate */}
@@ -1297,7 +1300,27 @@ export default function HomeDashboardPage() {
                       </label>
                     )}
                     {(settings.outputFormat || '').toUpperCase() === 'DSF' && (
-                      <span className="text-[10px] text-zinc-500">{t(lang, 'dsfOnlyFromDsd')}</span>
+                      <div className="flex flex-wrap items-center gap-1.5 text-zinc-400" title={t(lang, 'dsdEncodeHelp')}>
+                        <span>{t(lang, 'dsdEncode')}</span>
+                        <select
+                          value={settings.dsdRate ?? 64}
+                          onChange={(e) => updateSetting('dsdRate', Number(e.target.value) as any)}
+                          className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300"
+                        >
+                          <option value={64}>DSD64 (2.8 MHz)</option>
+                          <option value={128}>DSD128 (5.6 MHz)</option>
+                          <option value={256}>DSD256 (11.2 MHz)</option>
+                        </select>
+                        <select
+                          value={settings.dsdFilter ?? 'sdm-8'}
+                          onChange={(e) => updateSetting('dsdFilter', e.target.value)}
+                          className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300"
+                        >
+                          {['sdm-8', 'sdm-7', 'sdm-6', 'sdm-5', 'sdm-4', 'clans-8', 'clans-7', 'clans-6', 'clans-5', 'clans-4'].map(f => (
+                            <option key={f} value={f}>{f}{f === 'sdm-8' ? ` (${t(lang, 'dsdFilterDefault')})` : ''}</option>
+                          ))}
+                        </select>
+                      </div>
                     )}
                     <div className="flex items-center gap-1.5 text-zinc-400" title={t(lang, 'replayGainHelp')}>
                       <span>ReplayGain:</span>

@@ -1,0 +1,79 @@
+name: SoX
+
+# Builds the SoX with DSD support (sox-dsd, scripts/build-sox.sh) that ships with the
+# app for PCM -> DSD conversion, on every platform, and uploads it as the artifact
+# "sox-<name>" (bin/sox[.exe] and SOX-LICENSE.txt). Called by the test and release
+# workflows. Builds are cached by the script's hash.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: SoX ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-arm64, os: macos-latest }
+          - { name: macos-x64, os: macos-15-intel }
+          - { name: linux-x64, os: ubuntu-22.04 }
+          - { name: windows-x64, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cached build
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sox
+          key: sox-${{ matrix.name }}-${{ hashFiles('scripts/build-sox.sh') }}
+
+      - name: Install build tools (macOS)
+        if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
+        run: brew install autoconf automake libtool
+
+      - name: Install build tools (Linux)
+        if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool
+
+      - name: Set up MSYS2 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            make diffutils tar curl autoconf automake libtool
+            mingw-w64-ucrt-x86_64-gcc
+
+      - name: Build SoX
+        if: runner.os != 'Windows'
+        shell: bash
+        run: scripts/build-sox.sh "$RUNNER_TEMP/sox" | tail -n 2 >> "$GITHUB_ENV"
+
+      - name: Build SoX (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -o pipefail
+          scripts/build-sox.sh "$(cygpath -u "$RUNNER_TEMP")/sox" | tail -n 2 >> "$(cygpath -u "$GITHUB_ENV")"
+
+      # Same checks as a release: the program runs, writes DSF and has the sdm effect.
+      - name: Check the build
+        shell: bash
+        run: node scripts/prepare-sox.mjs --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sox-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/sox/out/bin/sox*
+            ${{ runner.temp }}/sox/out/SOX-LICENSE.txt

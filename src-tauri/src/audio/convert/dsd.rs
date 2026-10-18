@@ -366,6 +366,165 @@ pub fn dop_matches(original: &Path, converted: &Path, cancelled: &dyn Fn() -> bo
     result
 }
 
+/// Noise-shaping filters of sox-dsd's `sdm` effect.
+pub const SDM_FILTERS: &[&str] = &["sdm-4", "sdm-5", "sdm-6", "sdm-7", "sdm-8", "clans-4", "clans-5", "clans-6", "clans-7", "clans-8"];
+
+/// The SoX arguments that read `rate` Hz, `channels`-channel f32 PCM on stdin and write
+/// DSD (64/128/256 x 44.1 kHz) as a DSF file. sdm maps 0 dBFS to 50 % modulation (the
+/// SACD level), so the DSD decodes 6 dB below the PCM. (SoX's -G guard must not be used:
+/// with the 1-bit output it ruins the file.)
+pub fn sox_dsd_args(rate: u32, channels: u32, dsd_multiple: u32, filter: &str, output: &Path) -> Vec<String> {
+    let multiple = match dsd_multiple {
+        128 | 256 => dsd_multiple,
+        _ => 64,
+    };
+    let filter = if SDM_FILTERS.contains(&filter) { filter } else { "sdm-8" };
+    vec![
+        "-S".into(), "-V2".into(),
+        "-t".into(), "raw".into(), "-e".into(), "floating-point".into(), "-b".into(), "32".into(), "-L".into(),
+        "-r".into(), rate.to_string(), "-c".into(), channels.to_string(), "-".into(),
+        "-t".into(), "dsf".into(), output.to_string_lossy().into_owned(),
+        "rate".into(), "-v".into(), (44_100 * multiple).to_string(),
+        "sdm".into(), "-f".into(), filter.into(),
+    ]
+}
+
+/// "In:12.34%" in SoX's -S progress output (the last one in `text`).
+pub fn sox_progress(text: &str) -> Option<f64> {
+    let at = text.rfind("In:")?;
+    let rest = &text[at + 3..];
+    let end = rest.find('%')?;
+    rest[..end].trim().parse().ok()
+}
+
+/// PCM (any source FFmpeg reads) to a DSF file: FFmpeg decodes with the usual cut,
+/// channel and effect filters to f32 on a pipe, SoX resamples to the DSD rate and
+/// modulates with sox-dsd's sigma-delta modulator. Cancelling kills both.
+pub(super) fn pcm_to_dsf(
+    ctx: &JobCtx,
+    ffmpeg: &Path,
+    input: &Path,
+    settings: &ConverterSettings,
+    source: &SourceInfo,
+    gain_db: Option<f64>,
+    output: &Path,
+) -> Result<(), String> {
+    let (rate, channels) = target_shape(OutFormat::Dsf, settings, source);
+    let rate = rate.or(source.sample_rate).unwrap_or(44_100);
+    let channels = channels.or(source.channels).unwrap_or(2).max(1);
+    if channels > 6 {
+        return Err(format!("DSF holds at most 6 channels (the source has {channels})"));
+    }
+    let mut filters = pre_gain_filters(OutFormat::Dsf, settings, source);
+    if let Some(g) = gain_db.filter(|g| !same_as_source(settings) && g.is_finite() && *g != 0.0) {
+        filters.push(format!("volume={g:.4}dB"));
+    }
+    // A fixed layout for the channel count, so SoX gets exactly `channels` channels.
+    filters.push(format!("aformat=sample_fmts=flt:channel_layouts={}", layout_name(channels)));
+    let mut decode: Vec<String> = vec!["-nostdin".into(), "-v".into(), "error".into(), "-i".into(), input.to_string_lossy().into_owned(), "-map".into(), "0:a:0".into()];
+    decode.extend(["-af".into(), filters.join(",")]);
+    decode.extend(["-c:a".into(), "pcm_f32le".into(), "-f".into(), "f32le".into(), "-".into()]);
+
+    ctx.check()?;
+    ctx.emit("converting", 0.0);
+    let mut decoder = hidden_command(ffmpeg)
+        .args(&decode)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start FFmpeg: {e}"))?;
+    let pcm = decoder.stdout.take().ok_or("Failed to read FFmpeg's output")?;
+    let sox = crate::audio::audit::get_sox_executable();
+    let filter = settings.dsd_filter.as_deref().unwrap_or("sdm-8");
+    let mut modulator = match hidden_command(&sox)
+        .args(sox_dsd_args(rate, channels, settings.dsd_rate.unwrap_or(64), filter, output))
+        .stdin(Stdio::from(pcm))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = decoder.kill();
+            let _ = decoder.wait();
+            return Err(format!("Failed to start SoX ({}): {e}", sox.display()));
+        }
+    };
+
+    // Both stderr streams are drained on their own threads (a full pipe would stall the
+    // process); SoX's carries the progress, FFmpeg's only errors.
+    let ffmpeg_err = decoder.stderr.take();
+    let ffmpeg_tail = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(mut e) = ffmpeg_err {
+            let _ = e.read_to_string(&mut text);
+        }
+        text
+    });
+    let sox_err = modulator.stderr.take();
+    let progress_ctx = ctx.clone();
+    let sox_tail = std::thread::spawn(move || {
+        let mut tail = String::new();
+        if let Some(mut e) = sox_err {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = e.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                tail.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if let Some(p) = sox_progress(&tail) {
+                    progress_ctx.emit("converting", p.clamp(0.0, 99.0));
+                }
+                if tail.len() > 16384 {
+                    tail.drain(..tail.len() - 4096);
+                }
+            }
+        }
+        tail
+    });
+
+    let mut cancelled = false;
+    let (decode_status, modulate_status) = loop {
+        if ctx.cancelled() {
+            cancelled = true;
+            let _ = decoder.kill();
+            let _ = modulator.kill();
+        }
+        match (decoder.try_wait(), modulator.try_wait()) {
+            (Ok(Some(d)), Ok(Some(m))) => break (d, m),
+            (Err(e), _) | (_, Err(e)) => {
+                let _ = decoder.kill();
+                let _ = modulator.kill();
+                let _ = decoder.wait();
+                let _ = modulator.wait();
+                return Err(format!("PCM to DSD did not finish: {e}"));
+            }
+            (Ok(Some(d)), Ok(None)) if !d.success() => {
+                // The decoder failed: SoX would wait for more input forever otherwise.
+                let _ = modulator.kill();
+            }
+            _ => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let ffmpeg_text = ffmpeg_tail.join().unwrap_or_default();
+    let sox_text = sox_tail.join().unwrap_or_default();
+    if cancelled {
+        return Err("Conversion cancelled".into());
+    }
+    if !decode_status.success() {
+        let last = ffmpeg_text.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" / ");
+        return Err(format!("Cannot decode the source: {last}"));
+    }
+    if !modulate_status.success() {
+        let last: Vec<&str> = sox_text.split(['\n', '\r']).map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("In:")).collect();
+        let last = last.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join(" / ");
+        return Err(format!("SoX could not write DSD: {last}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub mod test_util {
     use super::*;

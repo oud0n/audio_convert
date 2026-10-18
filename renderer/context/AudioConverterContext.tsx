@@ -205,6 +205,8 @@ const defaultSettings: ConverterSettings = {
   coverFormat: 'keep',
   saveCoverFile: false,
   dop: false,
+  dsdRate: 64,
+  dsdFilter: 'sdm-8',
   tempoEnabled: false,
   tempoFrom: 25,
   tempoTo: 23.976,
@@ -1514,7 +1516,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           const capped = !!tabSettings.maxSampleRate && (fileRecord.sourceSampleRate ?? fileRecord.sampleRate) > tabSettings.maxSampleRate;
           const isLosslessPair = tabSettings.sameAsSource && !capped &&
                                 isLosslessSource(fileRecord.sourceLossless, fileRecord.name) &&
-                                LOSSLESS_OUTPUT_FORMATS.includes(fileRecord.outputFormat.toUpperCase());
+                                LOSSLESS_OUTPUT_FORMATS.includes(fileRecord.outputFormat.toUpperCase()) &&
+                                // PCM made into DSD is a new encoding, not a lossless copy.
+                                !(fileRecord.outputFormat.toUpperCase() === 'DSF' && !(fileRecord.sourceCodec ?? '').startsWith('dsd_'));
           try {
             const vRes = await AppBridge.verifyAudioQuality({
               jobId: job.id,
@@ -1665,7 +1669,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     const capped = !!tab.settings.maxSampleRate && (file.sourceSampleRate ?? file.sampleRate) > tab.settings.maxSampleRate;
     const isLosslessPair = (tab.settings.sameAsSource ?? true) && !capped &&
                           isLosslessSource(file.sourceLossless, file.name) &&
-                          LOSSLESS_OUTPUT_FORMATS.includes(file.outputFormat.toUpperCase());
+                          LOSSLESS_OUTPUT_FORMATS.includes(file.outputFormat.toUpperCase()) &&
+                          !(file.outputFormat.toUpperCase() === 'DSF' && !(file.sourceCodec ?? '').startsWith('dsd_'));
 
     try {
       const vRes = await AppBridge.verifyAudioQuality({

@@ -8,6 +8,8 @@ next-env.d.ts
 # build
 /app
 /dist
+# local builds of the bundled FFmpeg / SoX (scripts/build-*.sh)
+/build/
 
 *.old
 

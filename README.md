@@ -58,6 +58,9 @@ npm run build
 #### 同梱する FFmpeg
 `npm install` 時に `scripts/prepare-ffmpeg.mjs` が FFmpeg を `src-tauri/binaries/` にコピーし、アプリに同梱します（ライセンス文も同梱）。既定は `ffmpeg-static` のバイナリで、`FFMPEG_BUNDLE_SOURCE` で別のビルドを指定できます。リリースビルド（`node scripts/prepare-ffmpeg.mjs --release`）では、必要なエンコーダがない FFmpeg や `--enable-nonfree` でビルドされた（再配布できない）FFmpeg を拒否します。リリースでは全 OS で、`scripts/build-ffmpeg.sh` が公式ソース（ハッシュ固定）から LGPL 版の FFmpeg（LAME・Opus・Vorbis・soxr を静的リンク）をビルドして同梱します。GitHub Actions の `ffmpeg.yml` が macOS（Apple Silicon / Intel）・Linux・Windows（MSYS2）でこれをビルドし、テストとリリースで使います。ビルド結果はスクリプトのハッシュでキャッシュされ、スクリプトを変えたときだけ作り直されます。手元でも `scripts/build-ffmpeg.sh <作業フォルダ>` でビルドでき、最後の 2 行に出る `FFMPEG_BUNDLE_SOURCE` / `FFMPEG_BUNDLE_LICENSE` を指定して `node scripts/prepare-ffmpeg.mjs` を実行すると同梱されます。
 
+#### 同梱する SoX（PCM → DSD）
+PCM の音源を DSD（DSF）にする処理には、Måns Rullgård 氏の SoX 派生版 [sox-dsd](https://github.com/mansr/sox)（シグマデルタ変調器 `sdm`、既定のフィルタは xrecode と同じ `sdm-8`）を別プログラムとして同梱します（プログラムは GPL、DSD 処理を含むライブラリ部分は LGPL。ライセンス文を同梱）。`scripts/build-sox.sh` がコミット固定・ハッシュ固定のソースから外部ライブラリなしでビルドし、GitHub Actions の `sox.yml` が FFmpeg と同じ 4 環境でビルドします。手元では `scripts/build-sox.sh`（既定の作業フォルダ `build/sox`）を実行してから `node scripts/prepare-sox.mjs` で `src-tauri/binaries/` に置きます（autoconf・automake・libtool が必要）。アプリのビルドとテストにはこの SoX が必要です。
+
 ### 課題点・既知の制限事項
 
 * **検証済みの出力フォーマット**:
@@ -128,6 +131,9 @@ npm run build
 
 #### Bundled FFmpeg
 `npm install` runs `scripts/prepare-ffmpeg.mjs`, which copies FFmpeg to `src-tauri/binaries/` so it ships with the app (with its license text). The default is the `ffmpeg-static` binary; set `FFMPEG_BUNDLE_SOURCE` to use another build. Release builds (`node scripts/prepare-ffmpeg.mjs --release`) refuse an FFmpeg that lacks a required encoder or was built with `--enable-nonfree` (not redistributable). Releases on every platform bundle an LGPL FFmpeg built from the official, checksum-pinned sources by `scripts/build-ffmpeg.sh` (LAME, Opus, Vorbis and soxr linked statically). The GitHub Actions workflow `ffmpeg.yml` builds it on macOS (Apple Silicon and Intel), Linux and Windows (MSYS2) for the test and release workflows; builds are cached by the script's hash, so FFmpeg is rebuilt only when the script changes. To build it locally, run `scripts/build-ffmpeg.sh <work-dir>` and pass the `FFMPEG_BUNDLE_SOURCE` / `FFMPEG_BUNDLE_LICENSE` values from its last two lines to `node scripts/prepare-ffmpeg.mjs`.
+
+#### Bundled SoX (PCM to DSD)
+PCM sources are made into DSD (DSF) by Måns Rullgård's SoX fork [sox-dsd](https://github.com/mansr/sox) (its `sdm` sigma-delta modulator; the default filter `sdm-8` is xrecode's), bundled as a separate program (the program is GPL, the library code including the DSD support is LGPL; the license text ships with the app). `scripts/build-sox.sh` builds it without external libraries from a commit- and checksum-pinned source, and the GitHub Actions workflow `sox.yml` builds it on the same four platforms as FFmpeg. Locally, run `scripts/build-sox.sh` (default work folder `build/sox`, needs autoconf, automake and libtool) and then `node scripts/prepare-sox.mjs` to put it in `src-tauri/binaries/`. App builds and tests need it.
 
 ### Known Limitations
 
