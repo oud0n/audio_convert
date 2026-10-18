@@ -152,7 +152,7 @@ export const DonateModal: React.FC<DonateModalProps> = ({ isOpen, onClose, lang 
                 <Smartphone className="h-[13px] w-[13px] text-amber-400" />
                 <span>{ja ? 'スマホから支援' : 'From your phone'}</span>
               </div>
-              <div className="p-2.5 bg-[#ffffff] rounded-xl shadow-lg border border-zinc-300 flex items-center justify-center">
+              <div className="p-2.5 bg-[#ffffff] rounded-xl shadow-lg border border-[#d4d4d8] flex items-center justify-center">
                 <QRCodeSVG value={BUY_ME_A_COFFEE_URL} size={128} bgColor="#ffffff" fgColor="#000000" level="M" includeMargin={false} />
               </div>
               <p className="text-[10px] text-zinc-400 mt-2.5 leading-tight">

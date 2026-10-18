@@ -31,30 +31,39 @@ function resolve(s: ThemeSetting): ResolvedTheme {
   return s;
 }
 
-/** The window frame (title bar) follows the theme too in the desktop app. */
+/**
+ * The window frame (title bar) follows the theme too in the desktop app. On macOS this
+ * also changes the page's prefers-color-scheme, so "system" is decided again once the
+ * window theme is back to the OS one.
+ */
 function applyWindowTheme(s: ThemeSetting) {
   if (!hasWindow || !('__TAURI_INTERNALS__' in window)) return;
   import('@tauri-apps/api/window')
     .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(s === 'system' ? null : s))
+    .then(() => { if (setting === 'system' && s === 'system') applyClasses(); })
     .catch(() => {});
 }
 
-function apply() {
+function applyClasses() {
   resolved = resolve(setting);
   if (typeof document !== 'undefined') {
     const root = document.documentElement;
     root.classList.toggle('light', resolved === 'light');
     root.classList.toggle('dark', resolved === 'dark');
   }
-  applyWindowTheme(setting);
   listeners.forEach(l => l());
+}
+
+function apply() {
+  applyClasses();
+  applyWindowTheme(setting);
 }
 
 if (hasWindow) {
   apply();
   // In "system", follow the OS as soon as it changes.
   lightQuery?.addEventListener('change', () => {
-    if (setting === 'system') apply();
+    if (setting === 'system') applyClasses();
   });
 }
 

@@ -753,7 +753,7 @@ export default function HomeDashboardPage() {
                   aria-checked={themeSetting === value}
                   title={label}
                   className={`p-1 rounded transition-colors cursor-pointer ${
-                    themeSetting === value ? 'bg-zinc-700 text-fg' : 'text-zinc-500 hover:text-zinc-300'
+                    themeSetting === value ? 'bg-emerald-600 text-white' : 'text-zinc-500 hover:text-zinc-300'
                   }`}
                 >
                   <Icon className="h-3 w-3" />
