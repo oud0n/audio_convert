@@ -1767,3 +1767,11 @@ fn an_output_moved_into_its_source_name_is_protected() {
     assert_eq!(second.name, "song_2.flac");
     assert_eq!(compute_pcm_fingerprint(song_flac.to_str().unwrap()).unwrap().0, source_audio);
 }
+
+/// Writes a DSD test file to $DSF_FIXTURE (for manual checks): `cargo test --lib write_dsf_fixture -- --ignored`.
+#[test]
+#[ignore]
+fn write_dsf_fixture() {
+    let path = std::env::var("DSF_FIXTURE").expect("DSF_FIXTURE");
+    dsd::test_util::write_test_dsf(Path::new(&path), 3.0, 2);
+}

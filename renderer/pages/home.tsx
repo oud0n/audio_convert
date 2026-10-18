@@ -54,6 +54,18 @@ export default function HomeDashboardPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
+  // The queue table draws only the rows in view (plus a margin) when it is long.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [listView, setListView] = useState({ top: 0, height: 800 });
+  const updateListView = () => {
+    const el = listRef.current;
+    if (el) setListView({ top: el.scrollTop, height: el.clientHeight });
+  };
+  useEffect(() => {
+    updateListView();
+    window.addEventListener('resize', updateListView);
+    return () => window.removeEventListener('resize', updateListView);
+  }, []);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Tab editing states
@@ -847,6 +859,8 @@ export default function HomeDashboardPage() {
         {/* MIDDLE SECTION: FILE LIST VIEWPORT */}
         {/* ======================================================== */}
         <div 
+          ref={listRef}
+          onScroll={updateListView}
           onDragEnter={handleDrag}
           onDragOver={handleDrag}
           onDragLeave={handleDrag}
@@ -876,7 +890,16 @@ export default function HomeDashboardPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/30 text-[11px] font-mono">
-                  {files.map((file, index) => {
+                  {(() => {
+                    // Rows are ~46 px high. Short lists are drawn whole.
+                    const ROW = 46;
+                    const windowed = files.length > 200;
+                    const first = windowed ? Math.max(0, Math.floor((listView.top - 60) / ROW) - 20) : 0;
+                    const last = windowed ? Math.min(files.length, Math.ceil((listView.top + listView.height) / ROW) + 20) : files.length;
+                    return (<>
+                      {first > 0 && <tr aria-hidden style={{ height: first * ROW }}><td colSpan={13} /></tr>}
+                  {files.slice(first, last).map((file, offset) => {
+                    const index = first + offset;
                     const isSelected = selectedFileId === file.id;
                     const estSize = estimateOutputSize(file.duration, {
                       ...settings,
@@ -1030,6 +1053,9 @@ export default function HomeDashboardPage() {
                       </tr>
                     );
                   })}
+                      {last < files.length && <tr aria-hidden style={{ height: (files.length - last) * ROW }}><td colSpan={13} /></tr>}
+                    </>);
+                  })()}
                 </tbody>
               </table>
             </div>
@@ -1692,8 +1718,15 @@ export default function HomeDashboardPage() {
                 <div className="flex-1 overflow-y-auto mt-2 bg-zinc-950 font-mono text-[11px] p-3 rounded-lg border border-zinc-900 select-text leading-relaxed">
                   {logs.filter(log => showDebugLogs || !log.message.startsWith('[DEBUG]')).length > 0 ? (
                     <div className="space-y-1">
+                      {(() => {
+                        const shown = logs.filter(log => showDebugLogs || !log.message.startsWith('[DEBUG]'));
+                        return shown.length > 500 ? (
+                          <div className="text-zinc-600 italic">{lang === 'ja' ? `古いログ ${shown.length - 500} 件は表示を省略しています。` : `${shown.length - 500} older entries are not shown.`}</div>
+                        ) : null;
+                      })()}
                       {logs
                         .filter(log => showDebugLogs || !log.message.startsWith('[DEBUG]'))
+                        .slice(-500)
                         .map((log) => (
                           <div key={log.id} className="flex items-start gap-2">
                             <span className="text-zinc-650 shrink-0">[{log.timestamp}]</span>

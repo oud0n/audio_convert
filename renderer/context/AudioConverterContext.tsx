@@ -440,7 +440,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     const timestamp = new Date().toLocaleTimeString();
     const logId = 'log_' + Math.random().toString(36).substring(2, 9);
     const entry: LogEntry = { id: logId, timestamp, message, type };
-    setTabs(prev => prev.map(t => t.id === tabId ? { ...t, logs: [...t.logs, entry] } : t));
+    // Keep the latest 5000 entries: a batch of thousands of files logs several lines each.
+    setTabs(prev => prev.map(t => t.id === tabId ? { ...t, logs: t.logs.length >= 5000 ? [...t.logs.slice(-4999), entry] : [...t.logs, entry] } : t));
   };
 
   const addLog = (message: string, type: 'info' | 'success' | 'error' = 'info') => {
