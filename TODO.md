@@ -43,7 +43,6 @@
   - 内容: `autoVerifyQuality: false` 時であっても出力ファイルの存在・最小サイズ・再生可能性を確認してから安全にゴミ箱へ移動する。
 - [ ] **[Low] 未使用コード・重複コードの整理**
   - `renderer/utils/audioEncoder.ts` 内の未使用関数 `bufferToWav` の削除。
-  - `home.tsx` と `editor.tsx` で重複している波形描画・プレイヤーロジックの共通カスタムフック（`useAudioPlayer`）化。
 
 ---
 

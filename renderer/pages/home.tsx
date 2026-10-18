@@ -839,9 +839,10 @@ export default function HomeDashboardPage() {
           </div>
 
           {/* Top-Right Player bar */}
-          {/* min-w-0 on the bar and the seek slider: a range input keeps its default width
-              otherwise and pushed the volume control out of the window. */}
-          <div className="flex items-center gap-3 bg-zinc-900/60 border border-zinc-850 px-3 py-1 rounded-lg max-w-lg w-full min-w-[320px] flex-1 ml-auto">
+          {/* min-w-0 on the seek slider: a range input keeps its default width otherwise and
+              pushed the volume control out of the window. The bar keeps its content's
+              minimum width, so it wraps to its own line instead of overflowing. */}
+          <div className="flex items-center gap-3 bg-zinc-900/60 border border-zinc-850 px-3 py-1 rounded-lg max-w-lg w-full flex-1 ml-auto">
             <span className="text-[10px] font-mono text-zinc-500 shrink-0 w-24 truncate" title={selectedFile?.name || (lang === 'ja' ? '選択なし' : 'None')}>
               {selectedFile ? selectedFile.name : (lang === 'ja' ? 'トラック選択なし' : 'No track selected')}
             </span>

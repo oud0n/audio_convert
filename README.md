@@ -27,7 +27,7 @@ Tauri（Rust）と Next.js で作った、デスクトップ向けの音声変�
   - MP3 / AAC / Vorbis は CBR と VBR（V0〜V9。macOS の AAC は Apple の TVBR）に対応しています。
 - **DSD**:
   - DSF / DFF を PCM に変換できます。DSF へのビット単位のコピーや、DoP（FLAC / WAV / AIFF）での出力もできます。
-  - PCM から DSD（DSF、DSD64 / 128 / 256）への変換もできます。xrecode と同じ sox-dsd の `sdm-8` フィルタを使います。
+  - PCM から DSD（DSF、DSD64 / 128 / 256）への変換もできます。sox-dsd を使い、既定のフィルタは xrecode と同じ `sdm-8` です（sdm-4〜8・clans-4〜8 も選べます）。
 - **品質検証**:
   - ロスレス同士は、デコードした PCM の SHA-256 でビット一致を確認します。
   - 非可逆変換は、S/N 比・波形類似度・長さの差を 32 bit 浮動小数・元のチャンネル数で比較します。
@@ -40,7 +40,8 @@ Tauri（Rust）と Next.js で作った、デスクトップ向けの音声変�
 - **カバー**: 埋め込みカバーを引き継ぎます。元フォルダの `cover.jpg` などを埋め込んだり、縮小・形式変換したり、`folder.jpg` として保存したりもできます。
 - **CUE とチャプター**: `.cue`、埋め込み CUE シート、チャプターを曲ごとに分割します。時間ごと・無音での分割もできます。
 - **動作モード**:
-  - 結合（CUE 作成）
+  - エンコード（通常）
+  - 結合（CUE の作成も可）
   - チャンネル毎のファイルに分割
   - 多重チャンネルファイルにエンコード
   - 抽出（再エンコードなし）
@@ -51,6 +52,7 @@ Tauri（Rust）と Next.js で作った、デスクトップ向けの音声変�
 ### 開発とビルド
 
 ```bash
+scripts/build-sox.sh # SoX をビルド（初回のみ。アプリのビルドとテストに必要です）
 npm install          # 依存関係（postinstall で FFmpeg と SoX を src-tauri/binaries/ に置きます）
 npm run dev          # 開発モードで起動
 npm run build        # インストーラを作る（src-tauri/target/release/bundle/）
@@ -58,7 +60,7 @@ npm run typecheck    # 型チェック
 npm test             # JavaScript のテスト
 ```
 
-Rust のテストは `src-tauri` で `cargo test --lib` を実行します。テストと開発ビルドは、同梱用に用意した FFmpeg（`src-tauri/binaries/`）を使います。`FFMPEG_PATH` で別の FFmpeg を指定することもできます。
+Rust のテストは `src-tauri` で `cargo test --lib` を実行します。テストと開発ビルドは、同梱用に用意した FFmpeg（`src-tauri/binaries/`）を使います。`FFMPEG_PATH` で別の FFmpeg を指定することもできます。postinstall は既定では ffmpeg-static（GPL）を置きます。リリースでは下の LGPL 版を使います。
 
 #### 同梱する FFmpeg
 `scripts/build-ffmpeg.sh` が、公式ソース（ハッシュ固定）から LGPL 版の FFmpeg をビルドします（LAME・Opus・Vorbis・soxr を静的リンク）。GitHub Actions の `ffmpeg.yml` が macOS（Apple Silicon / Intel）・Linux・Windows（MSYS2）でこれをビルドし、テストとリリースで使います。
@@ -104,7 +106,7 @@ Get it from [Releases](https://github.com/oud0n/audio_convert/releases).
   - MP3 / AAC / Vorbis support CBR and VBR (V0–V9; AAC on macOS uses Apple's TVBR).
 - **DSD**:
   - DSF / DFF convert to PCM, copy bit for bit to DSF, or go out as DoP (FLAC / WAV / AIFF).
-  - PCM converts to DSD (DSF, DSD64 / 128 / 256) with sox-dsd's `sdm-8` filter, the one xrecode uses.
+  - PCM converts to DSD (DSF, DSD64 / 128 / 256) with sox-dsd. The default filter is `sdm-8`, the one xrecode uses (sdm-4–8 and clans-4–8 can be chosen).
 - **Quality check**:
   - Lossless conversions are checked bit for bit (SHA-256 of the decoded PCM).
   - Lossy conversions are compared by S/N ratio, waveform correlation and length, in 32-bit float at the source's channel count.
@@ -117,7 +119,8 @@ Get it from [Releases](https://github.com/oud0n/audio_convert/releases).
 - **Covers**: embedded covers are kept. Covers like `cover.jpg` from the source folder can be embedded, shrunk or converted, and saved as `folder.jpg`.
 - **CUE and chapters**: `.cue` files, embedded CUE sheets and chapters split into tracks. Files can also be split by time or at silences.
 - **Action modes**:
-  - Merge (with a CUE sheet)
+  - Encode (the default)
+  - Merge (optionally with a CUE sheet)
   - Split by channels
   - Encode multi-channel
   - Extract (no re-encoding)
@@ -128,6 +131,7 @@ Get it from [Releases](https://github.com/oud0n/audio_convert/releases).
 ### Development and build
 
 ```bash
+scripts/build-sox.sh # build SoX (once; app builds and tests need it)
 npm install          # dependencies (postinstall puts FFmpeg and SoX in src-tauri/binaries/)
 npm run dev          # start in development mode
 npm run build        # build the installers (src-tauri/target/release/bundle/)
@@ -135,7 +139,7 @@ npm run typecheck    # type check
 npm test             # JavaScript tests
 ```
 
-Run the Rust tests with `cargo test --lib` in `src-tauri`. Tests and development builds use the FFmpeg prepared for bundling (`src-tauri/binaries/`); set `FFMPEG_PATH` to use another one.
+Run the Rust tests with `cargo test --lib` in `src-tauri`. Tests and development builds use the FFmpeg prepared for bundling (`src-tauri/binaries/`); set `FFMPEG_PATH` to use another one. By default postinstall puts ffmpeg-static (GPL) there; releases use the LGPL build below.
 
 #### Bundled FFmpeg
 `scripts/build-ffmpeg.sh` builds an LGPL FFmpeg from the official, checksum-pinned sources (LAME, Opus, Vorbis and soxr linked statically). The GitHub Actions workflow `ffmpeg.yml` builds it on macOS (Apple Silicon and Intel), Linux and Windows (MSYS2) for the test and release workflows.
