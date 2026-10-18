@@ -34,6 +34,8 @@ export interface ConvertResult {
   skipped?: boolean;
   /** "Overwrite" hit the source itself; the output may take this path once the source is trashed. */
   replacesPath?: string | null;
+  /** Volume change the converter applied (normalization or boost), in dB. */
+  gainDb?: number | null;
 }
 
 export interface VerificationResponse {
@@ -100,6 +102,16 @@ export class AppBridge {
       return await ipc.invoke<MetadataResult>('read-audio-metadata', filePath);
     }
     throw new Error('No desktop runtime detected');
+  }
+
+  /** Native picker for audio files or folders (Tauri only; paths, not file contents). */
+  static async pickAudioPaths(folders: boolean, extensions: string[]): Promise<string[]> {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const selected = await open(folders
+      ? { directory: true, multiple: true }
+      : { multiple: true, filters: [{ name: 'Audio', extensions }] });
+    if (!selected) return [];
+    return Array.isArray(selected) ? selected : [selected];
   }
 
   static async selectDirectory(): Promise<string | null> {

@@ -215,6 +215,41 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const selectedFileId = activeTab ? activeTab.selectedFileId : null;
   const logs = activeTab ? activeTab.logs : [];
 
+  // The waveform and player need decoded audio. Only the selected file is decoded (on
+  // demand); files the backend can read again by path are released when not selected.
+  const selectedRecord = files.find(f => f.id === selectedFileId) || null;
+  const selectedPath = selectedRecord?.path || '';
+  const selectedHasBuffer = !!selectedRecord?.originalAudioBuffer;
+  const previewCtxRef = useRef<AudioContext | null>(null);
+  useEffect(() => {
+    const keepId = selectedFileId;
+    const releasable = (f: AudioFile) => !!f.originalAudioBuffer && !!f.path && f.id !== keepId;
+    setTabs(prev => prev.some(t => t.files.some(releasable))
+      ? prev.map(t => t.files.some(releasable)
+        ? { ...t, files: t.files.map(f => releasable(f) ? { ...f, originalAudioBuffer: null } : f) }
+        : t)
+      : prev);
+    if (!keepId || !selectedPath || selectedHasBuffer || !AppBridge.isAvailable()) return;
+    let stale = false;
+    AppBridge.decodeAudioToWav(selectedPath)
+      .then((data) => {
+        if (stale) return null;
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioCtx) return null;
+        if (!previewCtxRef.current) previewCtxRef.current = new AudioCtx();
+        return previewCtxRef.current.decodeAudioData(data);
+      })
+      .then((buffer) => {
+        if (stale || !buffer) return;
+        const info = analyzeAudioBuffer(buffer);
+        setTabs(prev => prev.map(t => t.files.some(f => f.id === keepId)
+          ? { ...t, files: t.files.map(f => f.id === keepId ? { ...f, originalAudioBuffer: buffer, peakDb: info.peakDb, rmsDb: info.rmsDb } : f) }
+          : t));
+      })
+      .catch((err) => console.warn('Cannot decode the selected file for preview:', err));
+    return () => { stale = true; };
+  }, [selectedFileId, selectedPath, selectedHasBuffer]);
+
   // Helper to add logs to specific tab
   const addLogToTab = (tabId: string, message: string, type: 'info' | 'success' | 'error' = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -414,6 +449,50 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       const fileSize = pathOnly ? (f as PathOnlyFile).nativeSize : f.size;
 
       addLogToTab(targetTabId, `[DEBUG] "${f.name}" - 解析開始 (サイズ: ${fileSize} bytes, 拡張子: ${ext})`, 'info');
+
+      // With the app backend, keep only the path and the metadata. The audio is read by
+      // FFmpeg at conversion time, and decoded for the waveform/player only while the
+      // file is selected, so a large folder does not fill memory.
+      const knownPath = AppBridge.isAvailable() ? AppBridge.getPathForFile(f) : '';
+      if (knownPath) {
+        AppBridge.readAudioMetadata(knownPath)
+          .then((meta) => {
+            const format = meta?.success ? meta.format : undefined;
+            if (!format || (!(format.duration > 0) && !(format.sampleRate > 0))) {
+              const reason = meta?.error || (lang === 'ja' ? '音声として読み込めません。' : 'Not a readable audio file.');
+              addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ読み込み失敗: ${reason}`, 'error');
+              resolve({ success: false, error: reason });
+              return;
+            }
+            const tags = meta.tags ? tagsFromMetadata(meta.tags) : emptyTags();
+            const fileRecord: AudioFile = {
+              id,
+              name: f.name,
+              path: knownPath,
+              size: fileSize,
+              duration: Math.round((format.duration || 0) * 10) / 10,
+              originalFormat: ext,
+              outputFormat: settings.outputFormat,
+              bitrate: format.bitrate ? `${Math.round(format.bitrate / 1000)}k` : `${settings.bitrate}k`,
+              sampleRate: format.sampleRate,
+              sourceSampleRate: format.sampleRate,
+              channels: format.numberOfChannels || 2,
+              status: 'queued',
+              progress: 0,
+              normalizationApplied: false,
+              originalAudioBuffer: null,
+              tags,
+              sourceTags: { ...tags },
+              sourceLossless: typeof format.lossless === 'boolean' ? format.lossless : undefined,
+            };
+            resolve({ success: true, fileRecord });
+          })
+          .catch((err) => {
+            addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ読み込み例外: ${err?.message || err}`, 'error');
+            resolve({ success: false, error: `${err?.message || err}` });
+          });
+        return;
+      }
 
       const reader = new FileReader();
       reader.onload = async (e) => {
@@ -742,7 +821,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     const tab = tabsRef.current.find(t => t.id === tabId);
     const fileRecord = tab?.files.find((f) => f.id === id);
     
-    if (!tab || !fileRecord || !fileRecord.originalAudioBuffer) {
+    if (!tab || !fileRecord || !fileRecord.path) {
       batchRef.current.failed++;
       updateFileStatus(tabId, id, 'failed', 0, 'Audio source missing or unreadable');
       processNextInQueue();
@@ -765,22 +844,14 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       await AppBridge.startConversionJob(job.id);
       checkActive();
 
-      const buffer = fileRecord.originalAudioBuffer;
-      const originalPeaks = analyzeAudioBuffer(buffer);
-      const targetDb = tabSettings.normalizationTargetDb;
-
-      let gainMult = tabSettings.sameAsSource ? 1.0 : Math.pow(10, tabSettings.volumeBoostDb / 20);
-      if (!tabSettings.sameAsSource && tabSettings.normalize && originalPeaks.peakDb > -120) {
-        const peakAmp = Math.pow(10, originalPeaks.peakDb / 20);
-        const targetAmp = Math.pow(10, targetDb / 20);
-        gainMult = targetAmp / peakAmp;
-      }
+      // The converter measures the peak itself and reports the gain it applied.
+      let gainMult: number | undefined = tabSettings.sameAsSource || tabSettings.normalize
+        ? undefined
+        : Math.pow(10, tabSettings.volumeBoostDb / 20);
 
       addLogToTab(tabId, `[${fileRecord.name}] Step 2: Converting with FFmpeg (resampling: ${tabSettings.sampleRate}Hz, bit depth: ${tabSettings.bitDepth}-bit)...`, 'info');
       updateFileStatus(tabId, id, 'converting', 0);
 
-      let convertedUrl: string | null = null;
-      let wavBlob: Blob | null = null;
       let savedOutputPath = '';
       // Set when "overwrite" hit the source file itself: the output got a new name and
       // takes the source's name once the source is in the trash.
@@ -832,15 +903,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           savedPath = saveResult.path;
           savedOutputPath = savedPath;
           finalExportName = saveResult.fileName || finalExportName;
-          try {
-            const preview = await AppBridge.readOutputPreview(savedPath, job.id);
-            checkActive();
-            wavBlob = new Blob([preview], { type: 'audio/wav' });
-            convertedUrl = URL.createObjectURL(wavBlob);
-          } catch (previewError) {
-            if (job.cancelled) throw previewError;
-            addLogToTab(tabId, `Output saved; preview unavailable: ${String(previewError)}`, 'info');
-          }
+          if (typeof saveResult.gainDb === 'number') gainMult = Math.pow(10, saveResult.gainDb / 20);
           addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ディスク保存完了: "${savedPath}"` : `[${fileRecord.name}] Saved successfully to: "${savedPath}"`, 'success');
         } else {
           throw new Error(saveResult?.error || 'Failed to save file');
@@ -922,8 +985,6 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               outputPath: savedOutputPath,
               status: 'completed',
               progress: 100,
-              convertedAudioUrl: convertedUrl,
-              convertedBlob: wavBlob,
               normalizationApplied: !tabSettings.sameAsSource && tabSettings.normalize,
               gainMultiplier: gainMult,
               originalDeleted: originalDeleted,

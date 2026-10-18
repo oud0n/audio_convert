@@ -104,11 +104,14 @@ pub struct ConvertResponse {
     /// can take this path with `move_output_into_place`.
     #[serde(rename = "replacesPath")]
     pub replaces_path: Option<String>,
+    /// Volume change applied by normalization or the manual boost, in dB.
+    #[serde(rename = "gainDb")]
+    pub gain_db: Option<f64>,
 }
 
 impl ConvertResponse {
     fn failure(error: String) -> Self {
-        Self { success: false, path: None, file_name: None, error: Some(error), skipped: false, replaces_path: None }
+        Self { success: false, path: None, file_name: None, error: Some(error), skipped: false, replaces_path: None, gain_db: None }
     }
 }
 
@@ -1351,6 +1354,8 @@ pub struct Converted {
     pub skipped: bool,
     /// See `ConvertResponse::replaces_path`.
     pub replaces: Option<PathBuf>,
+    /// See `ConvertResponse::gain_db`.
+    pub gain_db: Option<f64>,
 }
 
 /// True when `path` names the (canonicalized) input file.
@@ -1395,7 +1400,7 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
     // source itself: converting a file into its own folder and format is not "done".
     if on_existing == OnExisting::Skip && planned.is_file() && !is_input(&planned, &input) {
         let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        return Ok(Converted { path: planned, name, skipped: true, replaces: None });
+        return Ok(Converted { path: planned, name, skipped: true, replaces: None, gain_db: None });
     }
 
     let ffmpeg = get_ffmpeg_executable();
@@ -1509,7 +1514,7 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
         let is_source = is_input(&planned, &input);
         if on_existing == OnExisting::Skip && planned.is_file() && !is_source {
             let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-            return Ok(Converted { path: planned, name, skipped: true, replaces: None });
+            return Ok(Converted { path: planned, name, skipped: true, replaces: None, gain_db: None });
         }
         // Overwrite never replaces the source file itself; that falls back to a new name
         // (the UI may move it into place after the source went to the trash).
@@ -1523,7 +1528,7 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
             publish_unique(&staging, &dir, &stem, ext, ctx)?
         };
         let name = destination.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        Ok(Converted { path: destination, name, skipped: false, replaces })
+        Ok(Converted { path: destination, name, skipped: false, replaces, gain_db })
     }
 }
 
@@ -1610,6 +1615,7 @@ pub async fn convert_audio(
             error: None,
             skipped: done.skipped,
             replaces_path: done.replaces.map(|p| p.to_string_lossy().into_owned()),
+            gain_db: done.gain_db,
         },
         Err(e) => ConvertResponse::failure(e),
     })
@@ -1646,6 +1652,7 @@ pub async fn move_output_into_place(from: String, to: String) -> ConvertResponse
             error: None,
             skipped: false,
             replaces_path: None,
+            gain_db: None,
         },
         Err(e) => ConvertResponse::failure(e),
     }

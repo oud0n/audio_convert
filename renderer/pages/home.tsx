@@ -129,7 +129,7 @@ export default function HomeDashboardPage() {
           ctx.font = '11px "JetBrains Mono", monospace';
           ctx.fillStyle = '#4b5563';
           ctx.textAlign = 'center';
-          ctx.fillText('SELECT A FILE TO DRAW WAVEFORM', canvasRef.current.width / 2, canvasRef.current.height / 2);
+          ctx.fillText(selectedFile ? 'LOADING WAVEFORM...' : 'SELECT A FILE TO DRAW WAVEFORM', canvasRef.current.width / 2, canvasRef.current.height / 2);
         }
       }
       return;
@@ -511,9 +511,30 @@ export default function HomeDashboardPage() {
     }
   };
 
+  // Tauri: dropped or picked paths. Folders are expanded (recursively) by the backend,
+  // which also reports sizes; only paths are kept, the audio is read when needed.
+  const addPaths = (paths: string[]) => {
+    if (paths.length === 0) return;
+    AppBridge.expandDroppedPaths(paths, SUPPORTED_INPUT_EXTENSIONS)
+      .then((found) => {
+        const fileObjects = found.map(f => pathOnlyFile(f.path, f.name, f.size));
+        if (fileObjects.length > 0) handleAddFiles(fileObjects);
+      })
+      .catch((err) => console.warn('Cannot read dropped paths:', err));
+  };
+  const pickPaths = (folders: boolean) => {
+    if (!isTauri()) {
+      (folders ? folderInputRef : fileInputRef).current?.click();
+      return;
+    }
+    AppBridge.pickAudioPaths(folders, SUPPORTED_INPUT_EXTENSIONS)
+      .then(addPaths)
+      .catch((err) => console.warn('Cannot open the file picker:', err));
+  };
+
   // Register the native drop listener once; call the latest handler through a ref.
-  const handleAddFilesRef = useRef(handleAddFiles);
-  handleAddFilesRef.current = handleAddFiles;
+  const addPathsRef = useRef(addPaths);
+  addPathsRef.current = addPaths;
   useEffect(() => {
     if (!isTauri()) return;
     let disposed = false;
@@ -521,15 +542,7 @@ export default function HomeDashboardPage() {
     import('@tauri-apps/api/webviewWindow')
       .then(({ getCurrentWebviewWindow }) => getCurrentWebviewWindow().onDragDropEvent((event) => {
         if (event.payload.type !== 'drop') return;
-        const paths = event.payload.paths || [];
-        if (paths.length === 0) return;
-        // Folders are expanded (recursively) by the backend, which also reports sizes.
-        AppBridge.expandDroppedPaths(paths, SUPPORTED_INPUT_EXTENSIONS)
-          .then((found) => {
-            const fileObjects = found.map(f => pathOnlyFile(f.path, f.name, f.size));
-            if (fileObjects.length > 0) handleAddFilesRef.current(fileObjects);
-          })
-          .catch((err) => console.warn('Cannot read dropped paths:', err));
+        addPathsRef.current(event.payload.paths || []);
       }))
       .then((fn) => {
         if (disposed) fn();
@@ -694,14 +707,14 @@ export default function HomeDashboardPage() {
               className="hidden"
             />
             <button
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => pickPaths(false)}
               className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded font-semibold text-zinc-200 transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <Plus className="h-3.5 w-3.5 text-emerald-400" />
               <span>{t(lang, 'addFiles')}</span>
             </button>
             <button
-              onClick={() => folderInputRef.current?.click()}
+              onClick={() => pickPaths(true)}
               className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded font-semibold text-zinc-200 transition-colors flex items-center gap-1.5 cursor-pointer"
             >
               <Upload className="h-3.5 w-3.5 text-emerald-400" />
