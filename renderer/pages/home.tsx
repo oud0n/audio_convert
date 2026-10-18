@@ -1154,6 +1154,28 @@ export default function HomeDashboardPage() {
                       />
                       <span>{t(lang, 'createSourceFolder')}</span>
                     </label>
+                    <div className={`flex items-center gap-1.5 text-zinc-400 ${settings.saveInSourceFolder ? 'opacity-40' : ''}`}>
+                      <span>{t(lang, 'keepFolders')}</span>
+                      <select
+                        disabled={settings.saveInSourceFolder}
+                        value={settings.keepFolderFrom ?? 'last'}
+                        onChange={(e) => updateSetting('keepFolderFrom', e.target.value as any)}
+                        className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300"
+                      >
+                        <option value="last">{t(lang, 'keepFoldersLast')}</option>
+                        <option value="first">{t(lang, 'keepFoldersFirst')}</option>
+                      </select>
+                      <input
+                        type="number"
+                        min={0}
+                        max={20}
+                        disabled={settings.saveInSourceFolder}
+                        value={settings.keepFolderLevels ?? 0}
+                        onChange={(e) => updateSetting('keepFolderLevels', Math.max(0, Math.min(20, Math.floor(Number(e.target.value) || 0))) as any)}
+                        className="w-12 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300"
+                      />
+                      <span>{t(lang, 'keepFoldersLevels')}</span>
+                    </div>
                     <label className="flex items-center gap-2 text-zinc-400 cursor-pointer hover:text-zinc-250" title={t(lang, 'splitImagesHelp')}>
                       <input
                         type="checkbox"
@@ -1212,28 +1234,6 @@ export default function HomeDashboardPage() {
                         <option value="track">{t(lang, 'replayGainTrack')}</option>
                         <option value="album">{t(lang, 'replayGainAlbum')}</option>
                       </select>
-                    </div>
-                    <div className={`flex items-center gap-1.5 text-zinc-400 ${settings.saveInSourceFolder ? 'opacity-40' : ''}`}>
-                      <span>{t(lang, 'keepFolders')}</span>
-                      <select
-                        disabled={settings.saveInSourceFolder}
-                        value={settings.keepFolderFrom ?? 'last'}
-                        onChange={(e) => updateSetting('keepFolderFrom', e.target.value as any)}
-                        className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300"
-                      >
-                        <option value="last">{t(lang, 'keepFoldersLast')}</option>
-                        <option value="first">{t(lang, 'keepFoldersFirst')}</option>
-                      </select>
-                      <input
-                        type="number"
-                        min={0}
-                        max={20}
-                        disabled={settings.saveInSourceFolder}
-                        value={settings.keepFolderLevels ?? 0}
-                        onChange={(e) => updateSetting('keepFolderLevels', Math.max(0, Math.min(20, Math.floor(Number(e.target.value) || 0))) as any)}
-                        className="w-12 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300"
-                      />
-                      <span>{t(lang, 'keepFoldersLevels')}</span>
                     </div>
                   </div>
                   <div className="pt-1.5 border-t border-zinc-900">
