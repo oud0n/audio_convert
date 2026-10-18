@@ -74,6 +74,8 @@ export interface AudioFile {
   sourceSampleRate?: number;
   /** Channel count of the source file; channels follows the tab settings. */
   sourceChannels?: number;
+  /** FFmpeg codec name of the source's audio stream. */
+  sourceCodec?: string;
   normalizationApplied: boolean;
   gainMultiplier?: number;
   originalDeleted?: boolean;

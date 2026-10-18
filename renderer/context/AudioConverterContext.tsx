@@ -150,6 +150,7 @@ function imageTrackRecords(
       sourceTags: emptyTags(),
       sendAllTags: true,
       sourceLossless: typeof format.lossless === 'boolean' ? format.lossless : undefined,
+      sourceCodec: format.codec ?? undefined,
       trackStart: t.start,
       trackEnd: t.end ?? undefined,
       imageGroup: group,
@@ -672,6 +673,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               tags,
               sourceTags: { ...tags },
               sourceLossless: typeof format.lossless === 'boolean' ? format.lossless : undefined,
+      sourceCodec: format.codec ?? undefined,
             };
             // An audio file with an embedded CUE sheet or chapters becomes its tracks.
             const split = (tabsRef.current.find(t => t.id === targetTabId)?.settings.splitImages ?? true) && IMAGE_CAPABLE_EXTENSIONS.includes(ext);
@@ -1093,7 +1095,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         addLogToTab(targetTabId, lang === 'ja' ? `${replaced.size} 個のファイルをチャンネルごとに分けます。` : `Splitting ${replaced.size} files by channel.`, 'info');
       }
     }
-    const split = currentTab.settings.splitBy ?? 'off';
+    // Extract and Copy keep whole files, so they are never split.
+    const split = actionNow === 'extract' || actionNow === 'copy' ? 'off' : (currentTab.settings.splitBy ?? 'off');
     if (split !== 'off' && AppBridge.isAvailable()) {
       // Split each whole source into parts (rows like album-image tracks).
       const s = currentTab.settings;
@@ -1425,7 +1428,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         ? undefined
         : Math.pow(10, tabSettings.volumeBoostDb / 20);
 
-      addLogToTab(tabId, tabSettings.sameAsSource
+      addLogToTab(tabId, tabSettings.actionMode === 'copy'
+        ? `[${fileRecord.name}] Step 2: Copying the file (no re-encoding)...`
+        : tabSettings.actionMode === 'extract'
+        ? `[${fileRecord.name}] Step 2: Extracting the audio stream (no re-encoding)...`
+        : tabSettings.sameAsSource
         ? `[${fileRecord.name}] Step 2: Converting with FFmpeg (same as source: ${fileRecord.sourceSampleRate ?? fileRecord.sampleRate} Hz${outputSampleRate(fileRecord.sourceSampleRate ?? fileRecord.sampleRate, tabSettings, fileRecord.outputFormat) !== (fileRecord.sourceSampleRate ?? fileRecord.sampleRate) ? ` -> ${outputSampleRate(fileRecord.sourceSampleRate ?? fileRecord.sampleRate, tabSettings, fileRecord.outputFormat)} Hz` : ''})...`
         : `[${fileRecord.name}] Step 2: Converting with FFmpeg (resampling: ${tabSettings.sampleRate}Hz, bit depth: ${tabSettings.bitDepth}-bit)...`, 'info');
       updateFileStatus(tabId, id, 'converting', 0);

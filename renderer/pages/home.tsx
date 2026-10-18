@@ -15,7 +15,7 @@ import { estimateOutputSize } from '../utils/audioEncoder';
 import { MetadataTags, getFormatExtension, VBR_FORMATS } from '../types';
 import { t } from '../utils/i18n';
 import { AppBridge, isTauri, pathOnlyFile } from '../services/bridge';
-import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES, CHANNEL_KEYS, outputSampleRate } from '../utils/fileNamePattern';
+import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES, CHANNEL_KEYS, outputSampleRate, extractExtension } from '../utils/fileNamePattern';
 
 /** Height of a queue row in px (fixed, so the windowed list can place rows exactly). */
 const QUEUE_ROW_HEIGHT = 48;
@@ -943,7 +943,12 @@ export default function HomeDashboardPage() {
                             if (file.status === 'completed') {
                               return file.outputFileName || file.name;
                             }
-                            const ext = getFormatExtension(file.outputFormat || settings.outputFormat);
+                            // Extract keeps the stream's codec, Copy the file's own extension.
+                            const ext = settings.actionMode === 'copy'
+                              ? (file.originalFormat || getFormatExtension(file.outputFormat || settings.outputFormat))
+                              : settings.actionMode === 'extract'
+                                ? (file.sourceCodec ? extractExtension(file.sourceCodec) : '?')
+                                : getFormatExtension(file.outputFormat || settings.outputFormat);
                             const stem = settings.renameByTags && file.tags
                               ? renderFileName(settings.renamePattern, outputTags(file, settings), file.name)
                               : renderFileName('%filename%', {}, file.name);
@@ -970,7 +975,10 @@ export default function HomeDashboardPage() {
                         </td>
                         
                         {/* Sample rate */}
-                        <td className="py-2 px-3 text-zinc-400">{(outputSampleRate(file.sourceSampleRate ?? file.sampleRate, settings, file.outputFormat || settings.outputFormat) / 1000).toFixed(1)} kHz</td>
+                        <td className="py-2 px-3 text-zinc-400">{(((settings.dop && ['dsf', 'dff'].includes(file.originalFormat) && ['FLAC', 'WAV', 'AIFF'].includes((file.outputFormat || settings.outputFormat).toUpperCase()))
+                          // DoP carries DSD at half the rate it decodes to (DSD64: 176.4 kHz).
+                          ? (file.sourceSampleRate ?? file.sampleRate) / 2
+                          : outputSampleRate(file.sourceSampleRate ?? file.sampleRate, settings, file.outputFormat || settings.outputFormat)) / 1000).toFixed(1)} kHz</td>
 
                         {/* Bitrate */}
                         <td className="py-2 px-3 text-zinc-450 text-zinc-500">{settings.bitrate}k</td>
@@ -1573,7 +1581,7 @@ export default function HomeDashboardPage() {
             )}
 
             {/* 2. METADATA & WAVEFORM EDIT TAB */}
-            {bottomTab === 'metadata' && (
+            {bottomTab === 'metadata' && (<>
               <div className="grid grid-cols-1 md:grid-cols-12 gap-5 leading-normal">
                 {selectedFile ? (
                   <>
@@ -1705,7 +1713,28 @@ export default function HomeDashboardPage() {
                   </div>
                 )}
               </div>
-            )}
+              {/* Tag replacement rules (xrecode tagsreplace.txt format), for every output of this tab */}
+              <div className="mt-4 pt-3 border-t border-zinc-900 space-y-1.5">
+                <label className="flex items-center gap-2 text-[11px] text-zinc-300 font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={settings.tagReplaceEnabled ?? false}
+                    onChange={(e) => updateSetting('tagReplaceEnabled', e.target.checked)}
+                    className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer"
+                  />
+                  <span>{t(lang, 'tagRules')}</span>
+                </label>
+                <textarea
+                  value={settings.tagReplaceRules ?? ''}
+                  onChange={(e) => updateSetting('tagReplaceRules', e.target.value)}
+                  rows={5}
+                  spellCheck={false}
+                  placeholder={'[*]\nFeaturing=Ft.\n[Comments]\n<NULL>=Converted %y%-%m%-%d%\n[Genre]\n%CHANGECASE%=CapitalizEeachWord'}
+                  className={`w-full bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-[11px] text-zinc-300 font-mono select-text focus:border-emerald-500 focus:outline-none ${settings.tagReplaceEnabled ? '' : 'opacity-60'}`}
+                />
+                <span className="text-[10px] text-zinc-500 font-mono leading-tight block">{t(lang, 'tagRulesHelp')}</span>
+              </div>
+            </>)}
 
             {/* 3. LOG CONSOLE TAB */}
             {bottomTab === 'log' && (

@@ -362,3 +362,21 @@ export function outputSampleRate(sourceRate: number, s: { sameAsSource?: boolean
   if (mac && (format || '').toUpperCase() === 'M4A' && s.bitrateMode === 'vbr') rate = pickFrom(LOSSY_RATES.MP3, rate);
   return rate;
 }
+
+/** The extension Extract gives a stream (mirrors the converter's extract_container). */
+export function extractExtension(codec: string | undefined): string {
+  const c = (codec || '').toLowerCase();
+  if (c.startsWith('dsd_')) return 'dsf';
+  if (c === 'aac' || c === 'alac') return 'm4a';
+  if (c === 'mp3' || c === 'mp3float') return 'mp3';
+  if (c === 'mp2' || c === 'mp2float') return 'mp2';
+  if (c === 'flac') return 'flac';
+  if (c === 'opus') return 'opus';
+  if (c === 'vorbis') return 'ogg';
+  if (c === 'ac3' || c === 'eac3' || c === 'dts' || c === 'tta') return c;
+  if (c === 'truehd') return 'thd';
+  if (c === 'wavpack') return 'wv';
+  if (c.startsWith('wma')) return 'wma';
+  if (c.startsWith('pcm_')) return c.endsWith('be') ? 'aiff' : 'wav';
+  return 'mka';
+}
