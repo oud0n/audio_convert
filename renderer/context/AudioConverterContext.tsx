@@ -1188,7 +1188,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       title: firstTags.album || '', album: firstTags.album || '', artist: performer, albumArtist: performer,
       year: firstTags.year || '', genre: firstTags.genre || '', disc: firstTags.disc || '',
     };
-    const stemName = renderFileName('%albumartist% - %album%|%album%|%filename%', albumTags, first.name);
+    // A multichannel join is named after its first file with "_mc" (it would otherwise
+    // take that file's own name and get "_2" while the file is still there).
+    const stemName = joinChannels
+      ? `${renderFileName('%filename%', {}, first.channelIndex !== undefined ? baseName(first.path || first.name) : first.name)}_mc`
+      : renderFileName('%albumartist% - %album%|%album%|%filename%', albumTags, first.name);
     try {
       await AppBridge.startConversionJob(job.id);
       setRows(() => ({ status: 'converting', progress: 0, error: undefined }));
