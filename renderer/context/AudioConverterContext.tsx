@@ -198,6 +198,7 @@ const defaultSettings: ConverterSettings = {
   coverMaxHeight: 400,
   coverFormat: 'keep',
   saveCoverFile: false,
+  dop: false,
   mergeOutput: false,
   mergeCreateCue: true,
   keepFolderLevels: 0,

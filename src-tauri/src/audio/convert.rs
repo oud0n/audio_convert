@@ -89,6 +89,8 @@ pub struct ConverterSettings {
     /// Also save the cover as folder.jpg next to the output (never replacing a file).
     #[serde(rename = "saveCoverFile")]
     pub save_cover_file: Option<bool>,
+    /// DSD sources to FLAC / WAV / AIFF as DoP (the DSD bits packed in 24-bit PCM).
+    pub dop: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -364,6 +366,8 @@ pub enum OutFormat {
     Opus,
     Ac3,
     Wma,
+    /// DSD stream file (only from DSD sources: the bits are copied).
+    Dsf,
 }
 
 impl OutFormat {
@@ -380,6 +384,7 @@ impl OutFormat {
             "OPUS" => Self::Opus,
             "AC3" => Self::Ac3,
             "WMA" => Self::Wma,
+            "DSF" => Self::Dsf,
             _ => return None,
         })
     }
@@ -396,11 +401,12 @@ impl OutFormat {
             Self::Opus => "opus",
             Self::Ac3 => "ac3",
             Self::Wma => "wma",
+            Self::Dsf => "dsf",
         }
     }
 
     pub fn is_lossless(self) -> bool {
-        matches!(self, Self::Wav | Self::Aiff | Self::Flac | Self::Alac | Self::WavPack)
+        matches!(self, Self::Wav | Self::Aiff | Self::Flac | Self::Alac | Self::WavPack | Self::Dsf)
     }
 
     fn supports_cover(self) -> bool {
@@ -1048,6 +1054,7 @@ pub fn build_encode_args(
         OutFormat::Opus => "libopus",
         OutFormat::Ac3 => "ac3",
         OutFormat::Wma => "wmav2",
+        OutFormat::Dsf => return Err("DSF output needs a DSD source (PCM cannot be turned into DSD)".into()),
     };
     let vbr = vbr_args(format, settings, format == OutFormat::M4a && aac_at_available());
     let codec = vbr.as_ref().map_or(codec, |(c, _)| *c);
@@ -1800,9 +1807,57 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
         source_tags.retain(|(k, _)| !matches!(k.as_str(), "cuesheet" | "title" | "track" | "tracktotal" | "totaltracks" | "lyrics"));
     }
     let tags = merge_tags(&source_tags, request.tags.as_ref());
-    let plan = build_encode_args(format, &input, &temp_output, settings, &source, &tags, gain_db)?;
-    ctx.emit("converting", 0.0);
-    run_ffmpeg(ctx, &ffmpeg, &plan.args, source.duration, "converting")?;
+    // DSD kept as DSD: copied to DSF, or packed as DoP. Nothing else (gain, rate,
+    // channels) applies to the bit stream.
+    let dsd_source = dsd::is_dsd_codec(source.codec.as_deref());
+    let dop = dsd_source && settings.dop.unwrap_or(false) && matches!(format, OutFormat::Flac | OutFormat::Wav | OutFormat::Aiff);
+    if format == OutFormat::Dsf && !dsd_source {
+        return Err("DSF output needs a DSD source (PCM cannot be turned into DSD)".into());
+    }
+    let dsd_copy = format == OutFormat::Dsf || dop;
+    if dsd_copy && range.is_some() {
+        return Err("Tracks of a DSD image can only be converted to PCM".into());
+    }
+    let expected_bits = if dsd_copy {
+        ctx.emit("converting", 0.0);
+        let mut reader = dsd::DsdReader::open(&input)?;
+        let cancelled = || ctx.cancelled();
+        if format == OutFormat::Dsf {
+            dsd::write_dsf(&mut reader, &temp_output, &tags_for_output(&tags, false), &cancelled)?;
+        } else {
+            let mut after: Vec<String> = Vec::new();
+            let cover = source.cover_stream.filter(|_| format == OutFormat::Flac);
+            if cover.is_some() {
+                after.extend(["-i".into(), input.to_string_lossy().into_owned()]);
+            }
+            after.extend(["-map".into(), "0:a".into()]);
+            if let Some(index) = cover {
+                after.extend(["-map".into(), format!("1:{index}"), "-c:v".into(), "copy".into(), "-disposition:v:0".into(), "attached_pic".into()]);
+            }
+            match format {
+                OutFormat::Flac => {
+                    after.extend(["-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24", "-frame_size", "4096"].map(String::from));
+                    for (key, value) in split_totals_for_vorbis(tags_for_output(&tags, false)) {
+                        after.extend(["-metadata".into(), format!("{key}={value}")]);
+                    }
+                }
+                OutFormat::Aiff => {
+                    after.extend(["-c:a", "pcm_s24be", "-write_id3v2", "1"].map(String::from));
+                    for (key, value) in tags_for_output(&tags, false) {
+                        after.extend(["-metadata".into(), format!("{key}={value}")]);
+                    }
+                }
+                _ => after.extend(["-c:a", "pcm_s24le"].map(String::from)),
+            }
+            dsd::write_dop(&ffmpeg, &mut reader, &after, &temp_output, &cancelled)?;
+        }
+        None
+    } else {
+        let plan = build_encode_args(format, &input, &temp_output, settings, &source, &tags, gain_db)?;
+        ctx.emit("converting", 0.0);
+        run_ffmpeg(ctx, &ffmpeg, &plan.args, source.duration, "converting")?;
+        Some(plan.expected_bits)
+    };
     ctx.check()?;
 
     let size = fs::metadata(&temp_output).map(|m| m.len()).unwrap_or(0);
@@ -1843,16 +1898,16 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
 
     // In "same as source" mode a lossless output must have exactly the planned
     // rate (the source's, or the capped one), channels and bit depth.
-    if same_as_source(settings) && format.is_lossless() {
+    if let (true, true, Some(expected_bits)) = (same_as_source(settings), format.is_lossless(), expected_bits) {
         let (rate, channels) = target_shape(format, settings, &source);
         let out = probe_source(&ffmpeg, &temp_output)?;
         let mismatch = (rate.is_some() && out.sample_rate != rate)
             || (channels.is_some() && out.channels != channels)
-            || (plan.expected_bits.is_some() && out.bits_per_sample.is_some() && out.bits_per_sample != plan.expected_bits);
+            || (expected_bits.is_some() && out.bits_per_sample.is_some() && out.bits_per_sample != expected_bits);
         if mismatch {
             return Err(format!(
                 "Output does not keep the planned format (planned {:?} Hz / {:?} ch / {:?} bit, output {:?} Hz / {:?} ch / {:?} bit)",
-                rate, channels, plan.expected_bits, out.sample_rate, out.channels, out.bits_per_sample
+                rate, channels, expected_bits, out.sample_rate, out.channels, out.bits_per_sample
             ));
         }
     }
@@ -2138,6 +2193,7 @@ pub async fn move_output_into_place(from: String, to: String) -> ConvertResponse
     }
 }
 
+pub mod dsd;
 mod flac_verbatim;
 pub mod loudness;
 pub mod merge;

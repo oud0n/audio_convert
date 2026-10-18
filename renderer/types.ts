@@ -127,6 +127,7 @@ export interface ConverterSettings {
   coverMaxHeight?: number;
   coverFormat?: 'keep' | 'jpeg' | 'png';
   saveCoverFile?: boolean; // also save folder.jpg next to the output
+  dop?: boolean; // DSD sources to FLAC / WAV / AIFF as DoP (DSD over PCM)
   replayGain?: 'off' | 'track' | 'album';
   tagReplaceEnabled?: boolean; // apply tagReplaceRules to the output tags (and names)
   tagReplaceRules?: string; // xrecode tagsreplace.txt format // write ReplayGain 2.0 / R128 tags (EBU R128 measured)

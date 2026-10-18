@@ -599,7 +599,7 @@ export default function HomeDashboardPage() {
 
   // Helper lists for the format radio inputs
   // Only formats the converter can write.
-  const allFormats = ['MP3', 'Ogg', 'WMA', 'FLAC', 'WavPack', 'WAV', 'Opus', 'ALAC', 'AC3', 'AIFF', 'M4A'];
+  const allFormats = ['MP3', 'Ogg', 'WMA', 'FLAC', 'WavPack', 'WAV', 'Opus', 'ALAC', 'AC3', 'AIFF', 'M4A', 'DSF'];
 
   const actionModes = [
     { id: 'encode', label: lang === 'ja' ? 'エンコード' : 'Encode' },
@@ -1213,6 +1213,15 @@ export default function HomeDashboardPage() {
                         <option value="png">PNG</option>
                       </select>
                     </div>
+                    {['FLAC', 'WAV', 'AIFF'].includes((settings.outputFormat || '').toUpperCase()) && (
+                      <label className="flex items-center gap-2 text-zinc-400 cursor-pointer hover:text-zinc-250" title={t(lang, 'dopHelp')}>
+                        <input type="checkbox" checked={settings.dop ?? false} onChange={(e) => updateSetting('dop', e.target.checked)} className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer" />
+                        <span>{t(lang, 'dop')}</span>
+                      </label>
+                    )}
+                    {(settings.outputFormat || '').toUpperCase() === 'DSF' && (
+                      <span className="text-[10px] text-zinc-500">{t(lang, 'dsfOnlyFromDsd')}</span>
+                    )}
                     <div className="flex items-center gap-1.5 text-zinc-400" title={t(lang, 'replayGainHelp')}>
                       <span>ReplayGain:</span>
                       <select

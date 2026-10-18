@@ -31,6 +31,7 @@ fn settings(keep: bool) -> ConverterSettings {
         cover_max_height: None,
         cover_format: None,
         save_cover_file: None,
+        dop: None,
     }
 }
 
@@ -685,6 +686,72 @@ fn external_covers_are_embedded_resized_and_saved() {
     off.settings.cover_external = Some(false);
     let (none, _) = convert_blocking(&ctx(), &off).unwrap();
     assert!(!probe_source(&ff, &none).unwrap().has_art());
+}
+
+fn dsd_bits(path: &Path) -> (u32, u32, Vec<Vec<u8>>) {
+    let mut r = dsd::DsdReader::open(path).unwrap();
+    let mut all = vec![Vec::new(); r.channels as usize];
+    while let Some(chunk) = r.next_chunk().unwrap() {
+        for (a, c) in all.iter_mut().zip(chunk) {
+            a.extend(c);
+        }
+    }
+    (r.channels, r.rate, all)
+}
+
+#[test]
+fn dsd_sources_convert_to_pcm_dsf_and_dop() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let dsf = d.0.join("tone.dsf");
+    dsd::test_util::write_test_dsf(&dsf, 0.5, 2);
+    let ff = get_ffmpeg_executable();
+    let src = probe_source(&ff, &dsf).unwrap();
+    assert!(dsd::is_dsd_codec(src.codec.as_deref()), "{:?}", src.codec);
+    let out = d.0.join("out");
+
+    // PCM: 24-bit integer FLAC at the decoder's rate, or capped.
+    let (pcm, _) = convert_blocking(&ctx(), &request(&dsf, &out, "FLAC", "pcm")).unwrap();
+    let info = probe_source(&ff, &pcm).unwrap();
+    assert_eq!((info.sample_rate, info.bits_per_sample), (src.sample_rate, Some(24)));
+    let mut capped = request(&dsf, &out, "FLAC", "pcm96");
+    capped.settings.max_sample_rate = Some(96000);
+    let (pcm96, _) = convert_blocking(&ctx(), &capped).unwrap();
+    assert_eq!(probe_source(&ff, &pcm96).unwrap().sample_rate, Some(88200));
+
+    // DSF -> DSF keeps every bit and the tags.
+    let (copy, _) = convert_blocking(&ctx(), &request(&dsf, &out, "DSF", "copy")).unwrap();
+    assert_eq!(dsd_bits(&copy), dsd_bits(&dsf));
+    assert!(read_source_tags(&ff, &copy).unwrap().iter().any(|(k, v)| k == "title" && v == "DSD Test"));
+
+    // DFF -> DSF too.
+    let (ch, rate, bits) = dsd_bits(&dsf);
+    let dff = d.0.join("tone.dff");
+    dsd::test_util::write_test_dff(&dff, rate, &bits, 0);
+    assert_eq!(dsd_bits(&dff), (ch, rate, bits.clone()));
+    let (from_dff, _) = convert_blocking(&ctx(), &request(&dff, &out, "DSF", "fromdff")).unwrap();
+    assert_eq!(dsd_bits(&from_dff).2, bits);
+
+    // DoP: 24-bit PCM at 1/16 of the DSD rate carrying the same bits; verified as such.
+    for format in ["FLAC", "WAV", "AIFF"] {
+        let mut req = request(&dsf, &out, format, "dop");
+        req.settings.dop = Some(true);
+        let (dop, _) = convert_blocking(&ctx(), &req).unwrap_or_else(|e| panic!("{format}: {e}"));
+        let info = probe_source(&ff, &dop).unwrap();
+        assert_eq!(info.sample_rate, Some(176400), "{format}");
+        assert_eq!(dsd::dop_matches(&dsf, &dop, &|| false).unwrap(), Some(true), "{format}");
+        let r = crate::audio::audit::verify_quality_blocking(&dsf.to_string_lossy(), &dop.to_string_lossy(), true, &|| false).result.unwrap();
+        assert_eq!(r.status, "perfect", "{format}");
+    }
+    assert_eq!(dsd::dop_matches(&dsf, &pcm, &|| false).unwrap(), None, "plain PCM is not DoP");
+
+    // PCM sources cannot become DSD.
+    let wav = d.0.join("a.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=0.2", wav.to_str().unwrap()]);
+    let err = convert_blocking(&ctx(), &request(&wav, &out, "DSF", "no")).unwrap_err();
+    assert!(err.contains("DSD source"), "{err}");
 }
 
 #[test]

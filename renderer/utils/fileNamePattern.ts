@@ -186,7 +186,7 @@ export function editedTags(current: PatternTags, source: PatternTags | undefined
   return out;
 }
 
-export const LOSSLESS_OUTPUT_FORMATS = ['WAV', 'AIFF', 'FLAC', 'ALAC', 'WAVPACK'];
+export const LOSSLESS_OUTPUT_FORMATS = ['WAV', 'AIFF', 'FLAC', 'ALAC', 'WAVPACK', 'DSF'];
 
 const LOSSLESS_EXTENSIONS = ['wav', 'w64', 'rf64', 'bwf', 'aif', 'aiff', 'aifc', 'flac', 'fla', 'ape', 'wv', 'tta', 'tak'];
 

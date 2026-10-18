@@ -415,6 +415,39 @@ pub fn verify_quality_range(
         };
     }
 
+    // 0. DoP output of a DSD source: the DSD bits must come back unchanged.
+    if range.is_none() {
+        if let Ok(Some(same)) = crate::audio::convert::dsd::dop_matches(Path::new(&original_path), Path::new(&converted_path), cancelled) {
+            if cancelled() {
+                return failure(CANCELLED.into());
+            }
+            let (status, summary) = if same {
+                ("perfect", "DoP: DSD ビット列が完全一致")
+            } else {
+                ("degraded", "DoP: DSD ビット列が一致しません")
+            };
+            return VerifyQualityResponse {
+                success: true,
+                result: Some(QualityVerificationDetails {
+                    verified_at: now,
+                    is_lossless_pair: true,
+                    exact_match: same,
+                    original_hash: None,
+                    converted_hash: None,
+                    snr_db: None,
+                    max_diff_db: None,
+                    correlation_percent: None,
+                    has_high_freq_cutoff: false,
+                    cutoff_freq_hz: None,
+                    status: status.to_string(),
+                    summary_message: summary.to_string(),
+                    details: vec!["DoP (DSD over PCM) の 0x05 / 0xFA マーカーと 16 ビットずつの DSD データを元ファイルと比較しました。".to_string()],
+                }),
+                error: None,
+            };
+        }
+    }
+
     // 1. Bit-exact SHA-256 Fingerprint check
     let orig_hash = compute_pcm_fingerprint_range(&original_path, range, cancelled);
     if cancelled() {
