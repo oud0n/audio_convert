@@ -15,6 +15,12 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // The window starts hidden (tauri.conf.json) and is shown once its frame has
+            // the saved theme, so a chosen light / dark theme never flashes the OS one.
+            if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
+                let _ = window.set_theme(system::settings::saved_window_theme());
+                let _ = window.show();
+            }
             // macOS: "Support the developer" in the Help menu, like ds_universal (it opens
             // the same dialog as the header button). Windows and Linux keep no menu bar.
             #[cfg(target_os = "macos")]
@@ -71,6 +77,7 @@ pub fn run() {
             audio::audit::verify_audio_quality,
             system::settings::load_settings,
             system::settings::save_settings,
+            system::settings::save_window_theme,
             system::commands::trash_file,
             system::commands::expand_dropped_paths,
             system::commands::get_default_save_path,

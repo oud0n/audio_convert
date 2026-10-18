@@ -35,6 +35,26 @@ pub async fn load_settings() -> Option<Value> {
     None
 }
 
+/// The theme the user chose ("light" / "dark"; anything else = follow the OS), kept
+/// next to settings.json so the window frame can be set before it is shown.
+fn window_theme_path() -> PathBuf {
+    get_settings_file_path().with_file_name("window-theme")
+}
+
+#[tauri::command]
+pub fn save_window_theme(theme: String) {
+    let _ = fs::write(window_theme_path(), theme);
+}
+
+/// The saved window theme, if the user chose light or dark.
+pub fn saved_window_theme() -> Option<tauri::Theme> {
+    match fs::read_to_string(window_theme_path()).ok()?.trim() {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct SaveSettingsResponse {
     pub success: bool,

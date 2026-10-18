@@ -780,7 +780,7 @@ export default function HomeDashboardPage() {
         {/* ======================================================== */}
         {/* TOOLBAR: File pickers & Audio Player */}
         {/* ======================================================== */}
-        <div className="bg-zinc-950 border-b border-zinc-900 px-4 py-2 flex items-center justify-between gap-4 shrink-0 text-xs select-none">
+        <div className="bg-zinc-950 border-b border-zinc-900 px-4 py-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 shrink-0 text-xs select-none">
           <div className="flex items-center gap-1.5 shrink-0">
             {/* Import Buttons */}
             <input
@@ -839,7 +839,9 @@ export default function HomeDashboardPage() {
           </div>
 
           {/* Top-Right Player bar */}
-          <div className="flex items-center gap-3 bg-zinc-900/60 border border-zinc-850 px-3 py-1 rounded-lg max-w-md w-full">
+          {/* min-w-0 on the bar and the seek slider: a range input keeps its default width
+              otherwise and pushed the volume control out of the window. */}
+          <div className="flex items-center gap-3 bg-zinc-900/60 border border-zinc-850 px-3 py-1 rounded-lg max-w-lg w-full min-w-[320px] flex-1 ml-auto">
             <span className="text-[10px] font-mono text-zinc-500 shrink-0 w-24 truncate" title={selectedFile?.name || (lang === 'ja' ? '選択なし' : 'None')}>
               {selectedFile ? selectedFile.name : (lang === 'ja' ? 'トラック選択なし' : 'No track selected')}
             </span>
@@ -890,7 +892,7 @@ export default function HomeDashboardPage() {
               value={playbackProgress}
               onChange={handleSeekChange}
               disabled={!selectedFile}
-              className="flex-1 accent-emerald-500 bg-zinc-950 h-1 rounded-full cursor-pointer disabled:opacity-25"
+              className="flex-1 min-w-0 w-0 accent-emerald-500 bg-zinc-950 h-1 rounded-full cursor-pointer disabled:opacity-25"
             />
             {/* Playback time text */}
             <span className="text-[10px] font-mono text-zinc-400 shrink-0">

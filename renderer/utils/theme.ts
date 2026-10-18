@@ -38,6 +38,8 @@ function resolve(s: ThemeSetting): ResolvedTheme {
  */
 function applyWindowTheme(s: ThemeSetting) {
   if (!hasWindow || !('__TAURI_INTERNALS__' in window)) return;
+  // Also kept for the next start, when the window frame is set before it is shown.
+  import('@tauri-apps/api/core').then(({ invoke }) => invoke('save_window_theme', { theme: s })).catch(() => {});
   import('@tauri-apps/api/window')
     .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(s === 'system' ? null : s))
     .then(() => { if (setting === 'system' && s === 'system') applyClasses(); })
