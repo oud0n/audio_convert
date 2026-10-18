@@ -1057,12 +1057,12 @@ fn overwrite_never_replaces_a_queued_source() {
     ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=500:duration=0.2", "-c:a", "flac", x_flac.to_str().unwrap()]);
     ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=900:duration=0.2", "-c:a", "pcm_s16le", x_wav.to_str().unwrap()]);
     let wav_audio = compute_pcm_fingerprint(x_wav.to_str().unwrap()).unwrap().0;
-    set_queued_sources(vec![x_flac.to_string_lossy().into_owned(), x_wav.to_string_lossy().into_owned()]);
+    set_queued_sources_blocking(&[x_flac.clone(), x_wav.clone()]);
     let mut r = request(&x_flac, &d.0, "WAV", "x");
     r.settings.on_existing = Some("overwrite".into());
     r.settings.save_in_source_folder = Some(true);
     let done = convert_blocking_ex(&ctx(), &r).unwrap();
-    set_queued_sources(Vec::new());
+    set_queued_sources_blocking(&[]);
     assert_eq!(done.name, "x_2.wav");
     assert_eq!(compute_pcm_fingerprint(x_wav.to_str().unwrap()).unwrap().0, wav_audio, "the queued source is untouched");
 }

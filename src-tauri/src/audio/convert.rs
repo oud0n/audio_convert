@@ -94,37 +94,60 @@ pub struct ConvertRequest {
 /// and "skip" act on files that were there before (or on an earlier output of the same
 /// source); an output made from another source gets a new name instead, so a batch,
 /// a retry or a later batch never replaces another file's only copy.
-static SESSION_OUTPUTS: Mutex<Option<HashMap<PathBuf, PathBuf>>> = Mutex::new(None);
+static SESSION_OUTPUTS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 /// Sources still waiting in the current batch: no other conversion may replace them.
-static QUEUED_SOURCES: Mutex<Option<std::collections::HashSet<PathBuf>>> = Mutex::new(None);
+static QUEUED_SOURCES: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
 
-fn output_key(path: &Path) -> Option<PathBuf> {
-    fs::canonicalize(path).ok().map(simplify_verbatim_path)
+/// Identifies an existing file whatever path names it. On Unix this is the device and
+/// inode, so letter case on case-insensitive volumes (FAT/exFAT on Linux too) and hard
+/// links do not matter; Windows and macOS paths canonicalize to the on-disk name.
+fn output_key(path: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(path).ok().map(|m| format!("{}:{}", m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::canonicalize(path).ok().map(|p| simplify_verbatim_path(p).to_string_lossy().into_owned())
+    }
 }
 
 /// True when `path` is another source's output from this session, or another source
 /// that is still queued: "overwrite" and "skip" must leave such a file alone.
 fn written_from_other_source(path: &Path, input: &Path) -> bool {
     let Some(key) = output_key(path) else { return false };
-    if key != input && QUEUED_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|q| q.contains(&key)) {
+    let input_key = output_key(input);
+    if Some(&key) != input_key.as_ref()
+        && QUEUED_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|q| q.contains(&key))
+    {
         return true;
     }
     let guard = SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref().and_then(|m| m.get(&key)).is_some_and(|src| src != input)
+    guard.as_ref().and_then(|m| m.get(&key)).is_some_and(|src| Some(src) != input_key.as_ref())
 }
 
 /// Registers the sources of a batch that is starting (replaces the previous batch's).
 #[tauri::command]
-pub fn set_queued_sources(paths: Vec<String>) {
-    let set = paths.iter().filter_map(|p| output_key(Path::new(p))).collect();
+pub async fn set_queued_sources(paths: Vec<String>) {
+    let set = tauri::async_runtime::spawn_blocking(move || paths.iter().filter_map(|p| output_key(Path::new(p))).collect())
+        .await
+        .unwrap_or_default();
+    *QUEUED_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(set);
+}
+
+/// Sync form for tests.
+#[cfg(test)]
+fn set_queued_sources_blocking(paths: &[PathBuf]) {
+    let set = paths.iter().filter_map(|p| output_key(p)).collect();
     *QUEUED_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(set);
 }
 
 fn record_output(path: &Path, input: &Path) {
-    let Some(key) = output_key(path) else { return };
+    let (Some(key), Some(source)) = (output_key(path), output_key(input)) else { return };
     let mut guard = SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
-    guard.get_or_insert_with(HashMap::new).insert(key, input.to_path_buf());
+    guard.get_or_insert_with(HashMap::new).insert(key, source);
 }
 
 #[derive(Serialize, Debug)]
