@@ -52,7 +52,8 @@ if [ -x "$BIN" ] && [ -f "$LICENSE" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$SCR
   exit 0
 fi
 
-for tool in autoreconf automake make; do
+# pkg-config's autoconf macros (PKG_CHECK_MODULES) must be installed for autoreconf.
+for tool in autoreconf automake make pkg-config; do
   command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 1; }
 done
 
