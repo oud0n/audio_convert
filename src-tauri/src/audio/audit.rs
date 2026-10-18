@@ -193,108 +193,147 @@ pub fn compute_pcm_fingerprint_cancellable(
     Ok((hash, total_bytes))
 }
 
-fn extract_pcm_samples_from_wav(path: &Path) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut reader = hound::WavReader::open(path)?;
-    let spec = reader.spec();
-    let samples: Vec<i16> = match spec.sample_format {
-        hound::SampleFormat::Int => {
-            if spec.bits_per_sample == 16 {
-                reader.samples::<i16>().filter_map(Result::ok).collect()
-            } else if spec.bits_per_sample == 24 || spec.bits_per_sample == 32 {
-                reader
-                    .samples::<i32>()
-                    .filter_map(Result::ok)
-                    .map(|s| (s >> (spec.bits_per_sample - 16)) as i16)
-                    .collect()
-            } else {
-                reader
-                    .samples::<i32>()
-                    .filter_map(Result::ok)
-                    .map(|s| (s as f32 / (1 << (spec.bits_per_sample - 1)) as f32 * 32767.0) as i16)
-                    .collect()
-            }
-        }
-        hound::SampleFormat::Float => reader
-            .samples::<f32>()
-            .filter_map(Result::ok)
-            .map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
-            .collect(),
-    };
-    Ok(samples)
-}
-
 struct DiffMetrics {
     max_diff_db: f64,
     snr_db: f64,
     correlation_percent: f64,
 }
 
-fn compare_pcm_samples(pcm1: &[i16], pcm2: &[i16]) -> Result<DiffMetrics, Box<dyn std::error::Error + Send + Sync>> {
-    let min_len = pcm1.len().min(pcm2.len());
-    if min_len == 0 {
-        return Err("Cannot compare empty audio".into());
-    }
+/// Running sums for the waveform comparison, over 32-bit float samples (full scale 1.0)
+/// at the output's own rate and channel count, so 24-bit and multichannel differences
+/// are visible.
+#[derive(Default)]
+pub(crate) struct DiffAccumulator {
+    max_diff: f64,
+    sum_sq_diff: f64,
+    sum_sq1: f64,
+    sum_sq2: f64,
+    dot: f64,
+    count: f64,
+}
 
-    let mut max_diff: f64 = 0.0;
-    let mut sum_sq_diff: f64 = 0.0;
-    let mut sum_sq1: f64 = 0.0;
-    let mut sum_sq2: f64 = 0.0;
-    let mut dot_prod: f64 = 0.0;
-
-    let start_sample = 250.min(min_len * 5 / 1000);
-    let step = 1.max((min_len - start_sample) / 500000);
-    let mut count: f64 = 0.0;
-
-    for i in (start_sample..min_len).step_by(step) {
-        let s1 = pcm1[i] as f64;
-        let s2 = pcm2[i] as f64;
+impl DiffAccumulator {
+    pub(crate) fn push(&mut self, s1: f64, s2: f64) {
         let diff = (s1 - s2).abs();
+        self.max_diff = self.max_diff.max(diff);
+        self.sum_sq_diff += diff * diff;
+        self.sum_sq1 += s1 * s1;
+        self.sum_sq2 += s2 * s2;
+        self.dot += s1 * s2;
+        self.count += 1.0;
+    }
 
-        if diff > max_diff {
-            max_diff = diff;
+    fn finish(&self) -> Result<DiffMetrics, Box<dyn std::error::Error + Send + Sync>> {
+        if self.count == 0.0 {
+            return Err("Cannot compare empty audio".into());
         }
-        sum_sq_diff += diff * diff;
-        sum_sq1 += s1 * s1;
-        sum_sq2 += s2 * s2;
-        dot_prod += s1 * s2;
-        count += 1.0;
+        let mse = self.sum_sq_diff / self.count;
+        let p1 = self.sum_sq1 / self.count;
+        let p2 = self.sum_sq2 / self.count;
+        let mut snr_db = if mse > 0.0 && p1 > 0.0 { ((10.0 * (p1 / mse).log10()) * 10.0).round() / 10.0 } else { 100.0 };
+        let max_diff_db = if self.max_diff > 0.0 { ((20.0 * self.max_diff.log10()) * 10.0).round() / 10.0 } else { -100.0 };
+        let correlation = if p1 == 0.0 && p2 == 0.0 {
+            snr_db = 100.0;
+            1.0
+        } else if p1 == 0.0 || p2 == 0.0 {
+            snr_db = -100.0;
+            0.0
+        } else {
+            (self.dot / self.count) / (p1 * p2).sqrt()
+        };
+        let correlation_percent = ((correlation * 10000.0).round() / 100.0).clamp(0.0, 100.0);
+        Ok(DiffMetrics { max_diff_db, snr_db, correlation_percent })
     }
+}
 
-    let mse = sum_sq_diff / count;
-    let sig_pow1 = sum_sq1 / count;
-    let sig_pow2 = sum_sq2 / count;
-
-    let mut snr_db = 100.0;
-    if mse > 0.0 && sig_pow1 > 0.0 {
-        snr_db = ((10.0 * (sig_pow1 / mse).log10()) * 10.0).round() / 10.0;
-    } else if sig_pow1 == 0.0 && mse > 0.0 {
-        snr_db = -100.0;
+/// FFmpeg decoding `path` to interleaved f32 on stdout, optionally remixed / resampled.
+fn spawn_f32_decoder(
+    path: &str,
+    channels: Option<u32>,
+    rate: Option<u32>,
+) -> Result<std::process::Child, Box<dyn std::error::Error + Send + Sync>> {
+    let mut cmd = crate::audio::convert::hidden_command(&get_ffmpeg_executable());
+    cmd.args(["-v", "error", "-nostdin", "-i", path, "-map", "0:a:0"]);
+    if let Some(ch) = channels {
+        cmd.args(["-ac", &ch.to_string()]);
     }
-
-    let mut max_diff_db = -100.0;
-    if max_diff > 0.0 {
-        max_diff_db = ((20.0 * (max_diff / 32768.0).log10()) * 10.0).round() / 10.0;
+    if let Some(sr) = rate {
+        cmd.args(["-af", &crate::audio::convert::resample_filter(sr)]);
     }
+    cmd.args(["-c:a", "pcm_f32le", "-f", "f32le", "-"]);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+    Ok(cmd.spawn()?)
+}
 
-    let denom = (sig_pow1 * sig_pow2).sqrt();
-    let mut correlation = 0.0;
-    if sig_pow1 == 0.0 && sig_pow2 == 0.0 {
-        correlation = 1.0;
-        snr_db = 100.0;
-    } else if sig_pow1 == 0.0 || sig_pow2 == 0.0 {
-        correlation = 0.0;
-        snr_db = -100.0;
-    } else if denom > 0.0 {
-        correlation = (dot_prod / count) / denom;
+/// Fills `buf` as far as the stream allows; returns the bytes read (short only at the end).
+fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
     }
+    Ok(filled)
+}
 
-    let correlation_percent = ((correlation * 10000.0).round() / 100.0).clamp(0.0, 100.0);
-
-    Ok(DiffMetrics {
-        max_diff_db,
-        snr_db,
-        correlation_percent,
-    })
+/// Streams both files (the original remixed / resampled to the converted file's channel
+/// count and rate) and compares them sample by sample. The first 250 frames are left
+/// out when there is more (encoder start-up), as before.
+fn compare_files(
+    original: &str,
+    converted: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<DiffMetrics, Box<dyn std::error::Error + Send + Sync>> {
+    let out = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(converted)).map_err(|e| e.to_string())?;
+    let src = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(original)).map_err(|e| e.to_string())?;
+    let channels = out.channels.unwrap_or(2).max(1) as usize;
+    let remix = out.channels.filter(|c| src.channels != Some(*c));
+    let resample = out.sample_rate.filter(|r| src.sample_rate != Some(*r));
+    let mut a = spawn_f32_decoder(original, remix, resample)?;
+    let mut b = match spawn_f32_decoder(converted, None, None) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = a.kill();
+            let _ = a.wait();
+            return Err(e);
+        }
+    };
+    let result = (|| -> Result<DiffMetrics, Box<dyn std::error::Error + Send + Sync>> {
+        let mut ra = a.stdout.take().ok_or("Failed to open stdout")?;
+        let mut rb = b.stdout.take().ok_or("Failed to open stdout")?;
+        let frame = 4 * channels;
+        let mut ba = vec![0u8; frame * 8192];
+        let mut bb = vec![0u8; frame * 8192];
+        let (mut all, mut body) = (DiffAccumulator::default(), DiffAccumulator::default());
+        let mut index = 0usize;
+        loop {
+            if cancelled() {
+                return Err(CANCELLED.into());
+            }
+            let na = read_full(&mut ra, &mut ba)?;
+            let nb = read_full(&mut rb, &mut bb)?;
+            let n = na.min(nb) / 4 * 4;
+            for (x, y) in ba[..n].chunks_exact(4).zip(bb[..n].chunks_exact(4)) {
+                let s1 = f64::from(f32::from_le_bytes([x[0], x[1], x[2], x[3]]));
+                let s2 = f64::from(f32::from_le_bytes([y[0], y[1], y[2], y[3]]));
+                all.push(s1, s2);
+                if index / channels >= 250 {
+                    body.push(s1, s2);
+                }
+                index += 1;
+            }
+            if na < ba.len() || nb < bb.len() {
+                break;
+            }
+        }
+        if body.count > 0.0 { body.finish() } else { all.finish() }
+    })();
+    for child in [&mut a, &mut b] {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
 }
 
 /// Verifies a conversion. With a job id, it stops (and FFmpeg is killed) when that job
@@ -378,42 +417,13 @@ pub fn verify_quality_blocking(
     }
 
     // 2. Waveform Difference Analysis
-    // Compare at the output's sample rate: a resampled output (e.g. a 96 kHz limit on
-    // a 192 kHz source) would otherwise be compared sample by sample at different rates.
-    let converted_rate = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(&converted_path))
-        .ok()
-        .and_then(|info| info.sample_rate);
-    let temp_orig = match decode_to_temp_wav(&original_path, converted_rate, cancelled) {
-        Ok(p) => p,
-        Err(e) => {
-            return VerifyQualityResponse {
-                success: false,
-                result: None,
-                error: Some(if cancelled() { CANCELLED.to_string() } else { format!("Failed to decode original: {}", e) }),
-            }
-        }
-    };
-
-    let temp_conv = match decode_to_temp_wav(&converted_path, None, cancelled) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp_orig);
-            return VerifyQualityResponse {
-                success: false,
-                result: None,
-                error: Some(if cancelled() { CANCELLED.to_string() } else { format!("Failed to decode converted: {}", e) }),
-            }
-        }
-    };
-
-    let analysis_result = (|| -> Result<DiffMetrics, Box<dyn std::error::Error + Send + Sync>> {
-        let pcm1 = extract_pcm_samples_from_wav(&temp_orig)?;
-        let pcm2 = extract_pcm_samples_from_wav(&temp_conv)?;
-        compare_pcm_samples(&pcm1, &pcm2)
-    })();
-
-    let _ = std::fs::remove_file(&temp_orig);
-    let _ = std::fs::remove_file(&temp_conv);
+    // Compared at the output's rate and channel count (a 96 kHz limit on a 192 kHz
+    // source, or a downmix, would otherwise be compared sample by sample at different
+    // shapes), in 32-bit float so 24-bit and multichannel differences show.
+    let analysis_result = compare_files(&original_path, &converted_path, cancelled);
+    if cancelled() {
+        return failure(CANCELLED.into());
+    }
 
     let metrics = match analysis_result {
         Ok(m) => m,

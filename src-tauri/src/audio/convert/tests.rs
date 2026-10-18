@@ -901,6 +901,37 @@ fn verification_compares_resampled_output_at_its_own_rate() {
 }
 
 #[test]
+fn verification_sees_24_bit_and_multichannel_differences() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    // 24-bit source, 16-bit output: the old 16-bit comparison reported 100 dB.
+    let src = d.0.join("quiet24.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=1000:duration=0.5:sample_rate=48000", "-af", "volume=-60dB", "-c:a", "pcm_s24le", src.to_str().unwrap()]);
+    let mut req = request(&src, &d.0.join("out"), "WAV", "16bit");
+    req.settings.same_as_source = Some(false);
+    req.settings.bit_depth = Some("16".into());
+    req.settings.sample_rate = Some(48000);
+    let (out, _) = convert_blocking(&ctx(), &req).unwrap();
+    let r = crate::audio::audit::verify_quality_blocking(&src.to_string_lossy(), &out.to_string_lossy(), false, &|| false).result.unwrap();
+    assert!(r.snr_db.unwrap() < 60.0, "16-bit rounding of a -60 dB signal must show: {:?}", r.snr_db);
+
+    // One silent channel of six in the output is a real difference.
+    let six = d.0.join("six.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=500:duration=0.5", "-af", "aformat=channel_layouts=5.1", "-c:a", "pcm_s16le", six.to_str().unwrap()]);
+    let broken = d.0.join("broken.wav");
+    ffmpeg(&["-i", six.to_str().unwrap(), "-af", "pan=5.1|FL=FL|FR=FR|FC=FC|LFE=LFE|BL=BL|BR=0*BR", "-c:a", "pcm_s16le", broken.to_str().unwrap()]);
+    let r = crate::audio::audit::verify_quality_blocking(&six.to_string_lossy(), &broken.to_string_lossy(), false, &|| false).result.unwrap();
+    assert_ne!(r.status, "passed", "a lost channel must not pass (correlation {:?})", r.correlation_percent);
+
+    // 5.1 to stereo MP3 is compared against the downmixed source.
+    let (mp3, _) = convert_blocking(&ctx(), &request(&six, &d.0.join("out"), "MP3", "down")).unwrap();
+    let r = crate::audio::audit::verify_quality_blocking(&six.to_string_lossy(), &mp3.to_string_lossy(), false, &|| false).result.unwrap();
+    assert!(r.correlation_percent.unwrap() > 95.0, "{:?}", r.correlation_percent);
+}
+
+#[test]
 fn uncompressed_flac_is_verbatim_bit_exact_and_keeps_tags_and_cover() {
     if !ffmpeg_available() {
         return;
