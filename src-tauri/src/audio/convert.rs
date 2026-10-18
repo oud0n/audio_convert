@@ -101,17 +101,20 @@ static QUEUED_SOURCES: Mutex<Option<std::collections::HashSet<String>>> = Mutex:
 
 /// Identifies an existing file whatever path names it. On Unix this is the device and
 /// inode, so letter case on case-insensitive volumes (FAT/exFAT on Linux too) and hard
-/// links do not matter; Windows and macOS paths canonicalize to the on-disk name.
+/// links do not matter; Windows and macOS paths canonicalize to the on-disk name. Size
+/// and modification time are part of the key, so a reused inode or a file the user put
+/// at the same path later is not mistaken for the recorded one.
 fn output_key(path: &Path) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    let stamp = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
     #[cfg(unix)]
-    {
+    let id = {
         use std::os::unix::fs::MetadataExt;
-        fs::metadata(path).ok().map(|m| format!("{}:{}", m.dev(), m.ino()))
-    }
+        format!("{}:{}", meta.dev(), meta.ino())
+    };
     #[cfg(not(unix))]
-    {
-        fs::canonicalize(path).ok().map(|p| simplify_verbatim_path(p).to_string_lossy().into_owned())
-    }
+    let id = simplify_verbatim_path(fs::canonicalize(path).ok()?).to_string_lossy().into_owned();
+    Some(format!("{id}|{}|{stamp}", meta.len()))
 }
 
 /// True when `path` is another source's output from this session, or another source
@@ -1660,7 +1663,8 @@ pub async fn finish_conversion_job(state: tauri::State<'_, ActiveJobs>, job_id: 
 
 /// Preview decodes that are running, by the page's request id, and ids cancelled before
 /// their decode started (a cancel can arrive first). A cancel stops only its own request.
-static PREVIEWS: Mutex<Option<(HashMap<u64, Arc<std::sync::atomic::AtomicBool>>, std::collections::VecDeque<u64>)>> = Mutex::new(None);
+type PreviewState = (HashMap<u64, Arc<std::sync::atomic::AtomicBool>>, std::collections::VecDeque<u64>);
+static PREVIEWS: Mutex<Option<PreviewState>> = Mutex::new(None);
 
 /// Registers a preview decode; returns its cancel flag (already set if cancelled early).
 fn start_preview(id: u64) -> Arc<std::sync::atomic::AtomicBool> {
@@ -1704,7 +1708,7 @@ const PREVIEW_BUDGET: f64 = 48_000.0 * 2.0 * 1200.0;
 /// source's), then are cut. The limit always applies, so a wrong or unknown duration
 /// cannot make the preview larger than `PREVIEW_BUDGET`.
 pub fn preview_plan(source_rate: Option<u32>, duration: f64) -> (Option<u32>, u32, f64) {
-    let family = |r: u32| if r % 11_025 == 0 { 44_100 } else { 48_000 };
+    let family = |r: u32| if r.is_multiple_of(11_025) { 44_100 } else { 48_000 };
     let src = source_rate.unwrap_or(48_000).max(1);
     let full = if src > 48_000 { family(src) } else { src };
     let plan = |rate: u32, channels: u32| {
@@ -1790,7 +1794,12 @@ pub fn move_into_place(from: &Path, to: &Path) -> Result<(), String> {
     if from.parent() != to.parent() {
         return Err("The output can only be moved within its folder".into());
     }
+    // The output keeps its protection under the new name (a copy gets a new inode).
+    let source = output_key(from).and_then(|k| SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&k).cloned()));
     publish_output(from, to).map_err(|e| format!("Cannot rename output: {e}"))?;
+    if let (Some(source), Some(key)) = (source, output_key(to)) {
+        SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(key, source);
+    }
     fs::remove_file(from).map_err(|e| format!("Renamed, but cannot remove {}: {e}", from.display()))
 }
 
