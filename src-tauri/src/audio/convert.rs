@@ -1262,10 +1262,12 @@ pub fn build_encode_args(
     if let Some(g) = gain {
         filters.push(format!("volume={g:.4}dB"));
     }
-    // A lossy encoder needs a whole frame (AC-3: 1536 samples): a sound shorter than
-    // that gets silence after it up to 50 ms instead of an empty file.
-    if !format.is_lossless() && source.duration > 0.0 && source.duration < 0.05 {
-        filters.push("apad=whole_dur=0.05".into());
+    // A lossy encoder needs a whole frame: a very short sound gets silence after it
+    // instead of an empty file. Raw AC-3 needs several frames before FFmpeg (and so
+    // players) recognize the file at all, so it is padded to 250 ms.
+    let min_len = if format == OutFormat::Ac3 { 0.25 } else { 0.05 };
+    if !format.is_lossless() && source.duration > 0.0 && source.duration < min_len {
+        filters.push(format!("apad=whole_dur={min_len}"));
     }
 
     let (rate, channels) = target_shape(format, settings, source);
