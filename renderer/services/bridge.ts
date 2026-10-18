@@ -109,7 +109,8 @@ export class AppBridge {
     const { open } = await import('@tauri-apps/plugin-dialog');
     const selected = await open(folders
       ? { directory: true, multiple: true }
-      : { multiple: true, filters: [{ name: 'Audio', extensions }] });
+      // GTK matches the patterns case-sensitively, so list upper-case extensions too.
+      : { multiple: true, filters: [{ name: 'Audio', extensions: [...extensions, ...extensions.map(e => e.toUpperCase())] }] });
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
   }
@@ -175,26 +176,12 @@ export class AppBridge {
     return [];
   }
 
-  static async readOutputPreview(filePath: string, jobId?: string): Promise<ArrayBuffer> {
-    if (isTauri()) {
-      const { invoke } = await import('@tauri-apps/api/core');
-      const data = await invoke<number[] | Uint8Array>('read_output_preview', { filePath, jobId });
-      if (data instanceof Uint8Array) {
-        return (data.buffer as ArrayBuffer).slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
-      }
-      return new Uint8Array(data).buffer as ArrayBuffer;
-    }
-    const ipc = getIpc();
-    if (ipc) {
-      return await ipc.invoke<ArrayBuffer>('read-output-preview', filePath, jobId);
-    }
-    throw new Error('No desktop runtime detected');
-  }
-
   static async decodeAudioToWav(filePath: string): Promise<ArrayBuffer> {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core');
-      const data = await invoke<number[] | Uint8Array>('decode_audio_to_wav', { filePath });
+      // The backend answers with raw bytes (an ArrayBuffer).
+      const data = await invoke<ArrayBuffer | number[] | Uint8Array>('decode_audio_to_wav', { filePath });
+      if (data instanceof ArrayBuffer) return data;
       if (data instanceof Uint8Array) {
         return (data.buffer as ArrayBuffer).slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
       }

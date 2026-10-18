@@ -474,7 +474,11 @@ fn normalization_reaches_the_target_peak() {
     req.settings.same_as_source = Some(false);
     req.settings.normalize = Some(true);
     req.settings.normalization_target_db = Some(-1.0);
-    let (path, _) = convert_blocking(&ctx(), &req).unwrap();
+    let done = convert_blocking_ex(&ctx(), &req).unwrap();
+    // The gain is measured after the pre-gain filters (channel conversion etc.).
+    let gain = done.gain_db.expect("applied gain is reported");
+    assert!(gain > 30.0 && gain < 45.0, "gain {gain}");
+    let path = done.path;
     let out = hidden_command(&get_ffmpeg_executable())
         .args(["-nostdin", "-hide_banner", "-i", path.to_str().unwrap(), "-af", "volumedetect", "-f", "null", "-"])
         .output()
@@ -942,4 +946,36 @@ fn multichannel_hi_res_flac_uses_small_blocks_and_reads_back() {
             "uncompressed={uncompressed}: bit-exact"
         );
     }
+}
+
+#[test]
+fn sources_without_decodable_audio_fail_and_publish_nothing() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    // A WAV header with zero samples: readable metadata, no audio.
+    let src = d.0.join("zero.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=sample_rate=44100", "-frames:a", "0", "-c:a", "pcm_s24le", src.to_str().unwrap()]);
+    let out = d.0.join("out");
+    for format in ["FLAC", "MP3", "WAV", "OGG", "OPUS"] {
+        let err = convert_blocking(&ctx(), &request(&src, &out, format, "z")).unwrap_err();
+        assert!(err.contains("No audio"), "{format}: {err}");
+    }
+    assert!(!out.exists() || fs::read_dir(&out).unwrap().next().is_none(), "nothing published");
+    // A 2 ms file is short but has audio.
+    let tiny = d.0.join("tiny.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=sample_rate=48000", "-frames:a", "96", "-c:a", "pcm_s16le", tiny.to_str().unwrap()]);
+    convert_blocking(&ctx(), &request(&tiny, &out, "FLAC", "t")).unwrap();
+}
+
+#[test]
+fn preview_rate_reduces_only_high_rates() {
+    assert_eq!(preview_rate(Some(44_100)), None);
+    assert_eq!(preview_rate(Some(48_000)), None);
+    assert_eq!(preview_rate(Some(88_200)), Some(44_100));
+    assert_eq!(preview_rate(Some(352_800)), Some(44_100));
+    assert_eq!(preview_rate(Some(96_000)), Some(48_000));
+    assert_eq!(preview_rate(Some(384_000)), Some(48_000));
+    assert_eq!(preview_rate(None), None);
 }

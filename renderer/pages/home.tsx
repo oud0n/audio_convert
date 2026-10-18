@@ -33,6 +33,7 @@ export default function HomeDashboardPage() {
     handleUpdateTags,
     handleVerifyQuality,
     handleResetQueueStatus,
+    showToast,
 
     // Multi-tab extensions
     tabs,
@@ -129,7 +130,7 @@ export default function HomeDashboardPage() {
           ctx.font = '11px "JetBrains Mono", monospace';
           ctx.fillStyle = '#4b5563';
           ctx.textAlign = 'center';
-          ctx.fillText(selectedFile ? 'LOADING WAVEFORM...' : 'SELECT A FILE TO DRAW WAVEFORM', canvasRef.current.width / 2, canvasRef.current.height / 2);
+          ctx.fillText(!selectedFile ? 'SELECT A FILE TO DRAW WAVEFORM' : selectedFile.previewError ? 'WAVEFORM UNAVAILABLE (FILE CANNOT BE READ)' : 'LOADING WAVEFORM...', canvasRef.current.width / 2, canvasRef.current.height / 2);
         }
       }
       return;
@@ -517,8 +518,17 @@ export default function HomeDashboardPage() {
     if (paths.length === 0) return;
     AppBridge.expandDroppedPaths(paths, SUPPORTED_INPUT_EXTENSIONS)
       .then((found) => {
-        const fileObjects = found.map(f => pathOnlyFile(f.path, f.name, f.size));
-        if (fileObjects.length > 0) handleAddFiles(fileObjects);
+        if (found.length === 0) {
+          showToast('info', lang === 'ja' ? '対応している音声ファイルが見つかりませんでした。' : 'No supported audio files were found.');
+          return;
+        }
+        // The backend stops at 10000 files per drop or pick.
+        if (found.length >= 10000) {
+          showToast('error', lang === 'ja'
+            ? '一度に追加できるのは 10000 ファイルまでです。残りは追加されていません。'
+            : 'Up to 10000 files can be added at once; the rest were not added.');
+        }
+        handleAddFiles(found.map(f => pathOnlyFile(f.path, f.name, f.size)));
       })
       .catch((err) => console.warn('Cannot read dropped paths:', err));
   };

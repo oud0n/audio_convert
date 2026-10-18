@@ -58,8 +58,8 @@ export interface AudioFile {
   progress: number;
   error?: string;
   originalAudioBuffer?: AudioBuffer | null;
-  convertedAudioUrl?: string | null;
-  convertedBlob?: Blob | null;
+  /** Why the waveform/player audio could not be loaded. */
+  previewError?: string;
   peakDb?: number;
   rmsDb?: number;
   tags: MetadataTags;

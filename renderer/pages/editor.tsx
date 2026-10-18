@@ -71,7 +71,7 @@ export default function WaveformEditorPage() {
           ctx.font = '12px "JetBrains Mono", monospace';
           ctx.fillStyle = '#3f3f46';
           ctx.textAlign = 'center';
-          ctx.fillText(selectedFile ? 'LOADING WAVEFORM...' : 'SELECT A QUEUED AUDIO FILE TO DRAW WAVEFORM', canvasRef.current.width / 2, canvasRef.current.height / 2);
+          ctx.fillText(!selectedFile ? 'SELECT A QUEUED AUDIO FILE TO DRAW WAVEFORM' : selectedFile.previewError ? 'WAVEFORM UNAVAILABLE (FILE CANNOT BE READ)' : 'LOADING WAVEFORM...', canvasRef.current.width / 2, canvasRef.current.height / 2);
         }
       }
       return;

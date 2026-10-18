@@ -1475,6 +1475,9 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
         let _ = fs::remove_file(&pcm);
     }
 
+    // A source with an intact header but no decodable audio gives an empty output.
+    ensure_has_audio(&ffmpeg, &temp_output)?;
+
     // In "same as source" mode a lossless output must have exactly the planned
     // rate (the source's, or the capped one), channels and bit depth.
     if same_as_source(settings) && format.is_lossless() {
@@ -1532,6 +1535,25 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
     }
 }
 
+/// Fails when `path` holds no audio samples (empty outputs report no or zero duration).
+fn ensure_has_audio(ffmpeg: &Path, path: &Path) -> Result<(), String> {
+    const EMPTY: &str = "No audio could be decoded from the source file";
+    let info = probe_source(ffmpeg, path).map_err(|_| EMPTY.to_string())?;
+    if info.duration >= 0.05 {
+        return Ok(());
+    }
+    // Very short or empty: decoding it is cheap, so count the samples.
+    let out = hidden_command(ffmpeg)
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:a:0", "-f", "s16le", "-"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.stdout.is_empty() { Err(EMPTY.into()) } else { Ok(()) }
+}
+
 pub fn parse_max_volume(log: &str) -> Option<f64> {
     let line = log.lines().rev().find(|l| l.contains("max_volume:"))?;
     let value = line.split("max_volume:").nth(1)?.trim().trim_end_matches("dB").trim();
@@ -1564,28 +1586,35 @@ pub async fn finish_conversion_job(state: tauri::State<'_, ActiveJobs>, job_id: 
     Ok(())
 }
 
-#[tauri::command]
-pub async fn decode_audio_to_wav(file_path: String) -> Result<Vec<u8>, String> {
-    decode_wav_cancellable(file_path, Box::new(|| false)).await
+/// Generation of the latest preview request; an older decode stops when a newer one starts.
+static PREVIEW_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Preview rate: high rates are reduced to 44.1/48 kHz, which keeps the decoded audio small.
+pub fn preview_rate(source_rate: Option<u32>) -> Option<u32> {
+    match source_rate {
+        Some(r) if r > 48_000 => Some(if r % 44_100 == 0 { 44_100 } else { 48_000 }),
+        _ => None,
+    }
 }
 
-async fn decode_wav_cancellable(file_path: String, cancelled: Box<dyn Fn() -> bool + Send>) -> Result<Vec<u8>, String> {
+/// Decodes a file to 16-bit stereo WAV for the waveform and player. Only the newest
+/// request runs to the end, and the bytes go to the page as binary (not a JSON array).
+#[tauri::command]
+pub async fn decode_audio_to_wav(file_path: String) -> Result<tauri::ipc::Response, String> {
+    use std::sync::atomic::Ordering;
+    let generation = PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let superseded = move || PREVIEW_GENERATION.load(Ordering::SeqCst) != generation;
     tauri::async_runtime::spawn_blocking(move || {
-        let temp = decode_to_temp_wav(&file_path, None, &*cancelled).map_err(|e| e.to_string())?;
+        let rate = preview_rate(probe_source(&get_ffmpeg_executable(), Path::new(&file_path)).ok().and_then(|p| p.sample_rate));
+        let temp = decode_to_temp_wav(&file_path, rate, &superseded).map_err(|e| {
+            if superseded() { crate::audio::audit::CANCELLED.to_string() } else { e.to_string() }
+        })?;
         let data = fs::read(&temp).map_err(|e| e.to_string());
         let _ = fs::remove_file(&temp);
-        data
+        data.map(tauri::ipc::Response::new)
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-/// Decodes the saved output for the preview player; stops when the job is cancelled.
-#[tauri::command]
-pub async fn read_output_preview(app: AppHandle, file_path: String, job_id: Option<String>) -> Result<Vec<u8>, String> {
-    use tauri::Manager;
-    let jobs = app.state::<ActiveJobs>().inner().clone();
-    decode_wav_cancellable(file_path, Box::new(job_cancelled_fn(jobs, job_id))).await
 }
 
 /// "Has this job been cancelled?" for work outside the conversion itself. A cancel

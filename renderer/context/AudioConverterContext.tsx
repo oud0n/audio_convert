@@ -39,6 +39,23 @@ interface AudioConverterContextType {
   setLang: (lang: 'ja' | 'en') => void;
 }
 
+/** One AudioContext for decoding and sound effects (browsers limit how many exist). */
+let audioContextSingleton: AudioContext | null = null;
+function sharedAudioContext(): AudioContext | null {
+  if (typeof window === 'undefined') return null;
+  if (!audioContextSingleton) {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return null;
+    audioContextSingleton = new AudioCtx();
+  }
+  return audioContextSingleton;
+}
+
+/** The file to decode for the waveform/player: the output once the source is in the trash. */
+function previewSourcePath(f: AudioFile): string {
+  return f.originalDeleted && f.outputPath ? f.outputPath : f.path || '';
+}
+
 const AudioConverterContext = createContext<AudioConverterContextType | undefined>(undefined);
 
 const defaultSettings: ConverterSettings = {
@@ -216,14 +233,15 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const logs = activeTab ? activeTab.logs : [];
 
   // The waveform and player need decoded audio. Only the selected file is decoded (on
-  // demand); files the backend can read again by path are released when not selected.
+  // demand); with the app backend, files that can be read again are released when not
+  // selected. A source moved to the trash is read from its output instead.
   const selectedRecord = files.find(f => f.id === selectedFileId) || null;
-  const selectedPath = selectedRecord?.path || '';
+  const selectedPath = selectedRecord ? previewSourcePath(selectedRecord) : '';
   const selectedHasBuffer = !!selectedRecord?.originalAudioBuffer;
-  const previewCtxRef = useRef<AudioContext | null>(null);
   useEffect(() => {
     const keepId = selectedFileId;
-    const releasable = (f: AudioFile) => !!f.originalAudioBuffer && !!f.path && f.id !== keepId;
+    const releasable = (f: AudioFile) =>
+      AppBridge.isAvailable() && !!f.originalAudioBuffer && !!previewSourcePath(f) && f.id !== keepId;
     setTabs(prev => prev.some(t => t.files.some(releasable))
       ? prev.map(t => t.files.some(releasable)
         ? { ...t, files: t.files.map(f => releasable(f) ? { ...f, originalAudioBuffer: null } : f) }
@@ -231,22 +249,32 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       : prev);
     if (!keepId || !selectedPath || selectedHasBuffer || !AppBridge.isAvailable()) return;
     let stale = false;
+    if (selectedRecord?.previewError) {
+      setTabs(prev => prev.map(t => t.files.some(f => f.id === keepId)
+        ? { ...t, files: t.files.map(f => f.id === keepId ? { ...f, previewError: undefined } : f) }
+        : t));
+    }
     AppBridge.decodeAudioToWav(selectedPath)
       .then((data) => {
         if (stale) return null;
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (!AudioCtx) return null;
-        if (!previewCtxRef.current) previewCtxRef.current = new AudioCtx();
-        return previewCtxRef.current.decodeAudioData(data);
+        const ctx = sharedAudioContext();
+        if (!ctx) throw new Error('Web Audio is not available');
+        return ctx.decodeAudioData(data);
       })
       .then((buffer) => {
         if (stale || !buffer) return;
         const info = analyzeAudioBuffer(buffer);
         setTabs(prev => prev.map(t => t.files.some(f => f.id === keepId)
-          ? { ...t, files: t.files.map(f => f.id === keepId ? { ...f, originalAudioBuffer: buffer, peakDb: info.peakDb, rmsDb: info.rmsDb } : f) }
+          ? { ...t, files: t.files.map(f => f.id === keepId ? { ...f, originalAudioBuffer: buffer, previewError: undefined, peakDb: info.peakDb, rmsDb: info.rmsDb } : f) }
           : t));
       })
-      .catch((err) => console.warn('Cannot decode the selected file for preview:', err));
+      .catch((err) => {
+        if (stale) return;
+        const message = String(err?.message || err);
+        setTabs(prev => prev.map(t => t.files.some(f => f.id === keepId)
+          ? { ...t, files: t.files.map(f => f.id === keepId ? { ...f, previewError: message } : f) }
+          : t));
+      });
     return () => { stale = true; };
   }, [selectedFileId, selectedPath, selectedHasBuffer]);
 
@@ -388,9 +416,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const playNotificationSound = (type: ConverterSettings['notificationSound']) => {
     if (typeof window === 'undefined') return;
     try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
+      const ctx = sharedAudioContext();
+      if (!ctx) return;
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
       const osc = ctx.createOscillator();
       const gainNode = ctx.createGain();
       
@@ -502,13 +530,12 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           return;
         }
         try {
-          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-          if (!AudioCtx) {
+          const audioCtx = sharedAudioContext();
+          if (!audioCtx) {
             addLogToTab(targetTabId, `[DEBUG] "${f.name}" - エラー: Web Audio API (AudioContext) が未サポートです`, 'error');
             resolve({ success: false, error: 'Web Audio APIがサポートされていません。' });
             return;
           }
-          const audioCtx = new AudioCtx();
           
           addLogToTab(targetTabId, `[DEBUG] "${f.name}" - ブラウザネイティブ(AudioContext.decodeAudioData)デコード開始...`, 'info');
           
@@ -1152,8 +1179,6 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             progress: 0,
             error: undefined,
             verificationResult: undefined,
-            convertedAudioUrl: null,
-            convertedBlob: null,
             outputPath: undefined,
             outputFileName: undefined,
             outputFormat: t.settings.outputFormat,
