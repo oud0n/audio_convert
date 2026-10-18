@@ -187,6 +187,7 @@ fn passthrough(settings: &ConverterSettings) -> Option<Passthrough> {
 /// The file extension (and so the container) for an audio stream copied as it is.
 pub fn extract_container(codec: Option<&str>) -> &'static str {
     match codec.unwrap_or("") {
+        c if c.starts_with("dsd_") => "dsf",
         "aac" | "alac" => "m4a",
         "mp3" | "mp3float" => "mp3",
         "mp2" | "mp2float" => "mp2",
@@ -254,6 +255,10 @@ pub fn effect_filters(settings: &ConverterSettings, source: &SourceInfo) -> Vec<
                 out.push(format!("afade=t=out:st={:.3}:d={fout:.3}", (duration - fout).max(0.0)));
             }
         }
+    }
+    // Added silence belongs to the fade options (shown and used only with them on).
+    if !settings.fade_enabled.unwrap_or(false) {
+        return out;
     }
     let start = settings.pad_start_seconds.unwrap_or(0.0).max(0.0);
     if start > 0.0 {
@@ -682,6 +687,19 @@ fn save_folder_cover(ffmpeg: &Path, input: &Path, source: &SourceInfo, settings:
     }
 }
 
+/// True when FFmpeg can decode a frame of the image file.
+fn image_readable(ffmpeg: &Path, path: &Path) -> bool {
+    hidden_command(ffmpeg)
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-f", "null", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Codec arguments for the cover stream: a copy, or re-encoded when it is resized or
 /// its format changes.
 fn cover_codec_args(settings: &ConverterSettings, cover_is_png: bool) -> Vec<String> {
@@ -1032,6 +1050,9 @@ pub fn cap_rate(rate: u32, max: u32) -> u32 {
 pub fn target_shape(format: OutFormat, settings: &ConverterSettings, source: &SourceInfo) -> (Option<u32>, Option<u32>) {
     let (rate, channels) = if same_as_source(settings) {
         (source.sample_rate, source.channels)
+    } else if source.channel.is_some() {
+        // One channel of a split: always a mono file, whatever the channel setting.
+        (settings.sample_rate.or(source.sample_rate), Some(1))
     } else {
         (settings.sample_rate.or(source.sample_rate), settings.channels.or(source.channels))
     };
@@ -1945,6 +1966,11 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
     let planned = dir.join(format!("{stem}.{ext}"));
     // Only an existing file counts (not a folder or a dangling link), and never the
     // source itself: converting a file into its own folder and format is not "done".
+    if let (Some(s), Some(e)) = (request.start_seconds, request.end_seconds) {
+        if e <= s {
+            return Err(format!("Invalid track range: it ends ({e:.3} s) before it starts ({s:.3} s)"));
+        }
+    }
     let range = request.range();
     let channel = request.channel;
     let part = part_key(range, channel);
@@ -1974,7 +2000,8 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
         source.custom_layout = false;
     }
     if source.cover_stream.is_none() && request.settings.cover_external.unwrap_or(true) {
-        source.external_cover = folder_source.parent().and_then(find_external_cover);
+        // A broken or empty image file is ignored rather than failing the conversion.
+        source.external_cover = folder_source.parent().and_then(find_external_cover).filter(|cover| image_readable(&ffmpeg, cover));
     }
     ctx.check()?;
 
@@ -2036,8 +2063,25 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
         }
         let edits: Vec<(&str, String)> = request.tags.as_ref().map(edit_pairs).unwrap_or_default();
         ctx.emit("converting", 0.0);
-        if action == Passthrough::Copy && edits.is_empty() {
-            fs::copy(&input, &temp_output).map_err(|e| format!("Cannot copy the file: {e}"))?;
+        if action == Passthrough::Copy {
+            // The bytes as they are; tag edits through lofty, which also writes formats
+            // FFmpeg cannot (APE, TAK, DSF, ...).
+            if !edits.is_empty() && ext == "dsf" {
+                // DSF: the same bits written again with the edited ID3 tag.
+                let mut reader = dsd::DsdReader::open(&input)?;
+                let cancelled = || ctx.cancelled();
+                dsd::write_dsf(&mut reader, &temp_output, &tags_for_output(&tags, false), &cancelled)?;
+            } else {
+                fs::copy(&input, &temp_output).map_err(|e| format!("Cannot copy the file: {e}"))?;
+            }
+            if !edits.is_empty() && ext != "dsf" {
+                let pairs: Vec<(String, String)> = edits.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+                loudness::write_tags(&temp_output, &pairs).map_err(|e| format!("Copied, but the tag changes cannot be written: {e}"))?;
+            }
+        } else if dsd::is_dsd_codec(source.codec.as_deref()) {
+            let mut reader = dsd::DsdReader::open(&input)?;
+            let cancelled = || ctx.cancelled();
+            dsd::write_dsf(&mut reader, &temp_output, &tags_for_output(&tags, false), &cancelled)?;
         } else {
             // Streams copied unchanged; only the container (extract) or tags change.
             let mut args: Vec<String> = vec!["-y".into(), "-i".into(), input.to_string_lossy().into_owned()];
@@ -2052,8 +2096,13 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
                 }
             }
             args.extend(["-c".into(), "copy".into(), "-map_metadata".into(), "0".into()]);
+            // Ogg keeps tags in the stream, the other containers globally.
+            let tag_flag = if matches!(ext, "ogg" | "opus") { "-metadata:s:a:0" } else { "-metadata" };
+            if matches!(ext, "ogg" | "opus") {
+                args.extend(["-map_metadata:s:a:0".into(), "0:s:a:0".into()]);
+            }
             for (key, value) in edits {
-                args.extend(["-metadata".into(), format!("{key}={value}")]);
+                args.extend([tag_flag.into(), format!("{key}={value}")]);
             }
             args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into(), temp_output.to_string_lossy().into_owned()]);
             run_ffmpeg(ctx, &ffmpeg, &args, source.duration, "converting")?;

@@ -905,8 +905,78 @@ fn extract_and_copy_keep_the_stream() {
     assert!(read_source_tags(&ff, &tagged).unwrap().iter().any(|(k, v)| k == "title" && v == "New"));
     assert!(probe_source(&ff, &tagged).unwrap().has_art());
     assert_eq!(compute_pcm_fingerprint(tagged.to_str().unwrap()).unwrap(), compute_pcm_fingerprint(src.to_str().unwrap()).unwrap());
+    // Tag edits reach Ogg / Opus (stream tags) for both copy and extract.
+    let ogg = d.0.join("v.ogg");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=0.3", "-c:a", "libvorbis", "-metadata:s:a:0", "title=Old", ogg.to_str().unwrap()]);
+    for mode in ["copy", "extract"] {
+        let mut req = request(&ogg, &out, "MP3", &format!("ogg_{mode}"));
+        req.settings.action_mode = Some(mode.into());
+        req.tags = Some(InputTags { title: Some("New".into()), track: Some("3/9".into()), ..Default::default() });
+        let (p, _) = convert_blocking(&ctx(), &req).unwrap_or_else(|e| panic!("{mode}: {e}"));
+        let tags = read_source_tags(&ff, &p).unwrap();
+        assert!(tags.iter().any(|(k, v)| k == "title" && v == "New"), "{mode}: {tags:?}");
+    }
+    // DSD: extract writes DSF; copy with an edit writes the tag through lofty.
+    let dsf = d.0.join("t.dsf");
+    dsd::test_util::write_test_dsf(&dsf, 0.2, 2);
+    let mut req = request(&dsf, &out, "FLAC", "dsd_x");
+    req.settings.action_mode = Some("extract".into());
+    let (p, name) = convert_blocking(&ctx(), &req).unwrap();
+    assert_eq!(name, "dsd_x.dsf");
+    assert_eq!(dsd_bits(&p), dsd_bits(&dsf));
+    req.settings.action_mode = Some("copy".into());
+    req.tags = Some(InputTags { title: Some("Edited".into()), ..Default::default() });
+    let (p, _) = convert_blocking(&ctx(), &req).unwrap();
+    assert!(read_source_tags(&ff, &p).unwrap().iter().any(|(k, v)| k == "title" && v == "Edited"));
+    assert_eq!(dsd_bits(&p), dsd_bits(&dsf));
     assert_eq!(extract_container(Some("pcm_s24be")), "aiff");
     assert_eq!(extract_container(Some("something")), "mka");
+}
+
+#[test]
+fn join_keeps_every_channel_for_any_count_and_length() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let ff = get_ffmpeg_executable();
+    let tone = |name: &str, f: u32, dur: &str, ch: &str| {
+        let p = d.0.join(name);
+        ffmpeg(&["-f", "lavfi", "-i", &format!("sine=frequency={f}:sample_rate=48000:duration={dur}"), "-af", &format!("aformat=channel_layouts={ch}"), "-c:a", "pcm_s16le", p.to_str().unwrap()]);
+        p
+    };
+    let out = d.0.join("out");
+    let join = |inputs: Vec<PathBuf>, name: &str, explicit: bool| {
+        let mut st = settings(!explicit);
+        st.local_save_path = Some(out.to_string_lossy().into_owned());
+        st.channels = Some(2);
+        st.sample_rate = Some(48000);
+        st.bit_depth = Some("16".into());
+        let req = merge::MergeRequest {
+            inputs: inputs.iter().map(|p| merge::MergeInput { path: p.to_string_lossy().into_owned(), start_seconds: None, end_seconds: None, title: String::new(), artist: String::new() }).collect(),
+            file_name: name.into(), output_format: "FLAC".into(), job_id: None, settings: st, tags: None, create_cue: None, verify: Some(true), join_channels: true,
+        };
+        merge::merge_blocking(&ctx(), &req).unwrap()
+    };
+    let a = tone("a.wav", 300, "0.5", "mono");
+    let b = tone("b.wav", 400, "0.5", "mono");
+    let c = tone("c.wav", 500, "0.5", "mono");
+    let e = tone("e.wav", 600, "0.5", "mono");
+    for (inputs, total) in [(vec![a.clone(), b.clone(), c.clone()], 3), (vec![a.clone(), b.clone(), c.clone(), e.clone()], 4)] {
+        let m = join(inputs.clone(), &format!("j{total}"), false);
+        assert_eq!(m.verified.as_ref().map(|v| v.0), Some(true), "{total}: {:?}", m.verified);
+        assert_eq!(probe_source(&ff, &m.converted.path).unwrap().channels, Some(total));
+    }
+    // Mono + stereo keeps the input order; an explicit 2-channel setting does not downmix.
+    let st = tone("st.wav", 700, "0.5", "stereo");
+    let m = join(vec![a.clone(), st], "ms", true);
+    assert_eq!(probe_source(&ff, &m.converted.path).unwrap().channels, Some(3));
+    // A longer input is not cut.
+    let long = tone("long.wav", 800, "1.0049", "mono");
+    let m = join(vec![a.clone(), long.clone()], "len", false);
+    let (_, bytes) = compute_pcm_fingerprint(m.converted.path.to_str().unwrap()).unwrap();
+    let (_, long_bytes) = compute_pcm_fingerprint(long.to_str().unwrap()).unwrap();
+    assert_eq!(bytes, long_bytes * 2, "every sample of the longest input");
 }
 
 #[test]

@@ -93,13 +93,38 @@ fn item_key(key: &str) -> ItemKey {
         "REPLAYGAIN_TRACK_PEAK" => ItemKey::ReplayGainTrackPeak,
         "REPLAYGAIN_ALBUM_GAIN" => ItemKey::ReplayGainAlbumGain,
         "REPLAYGAIN_ALBUM_PEAK" => ItemKey::ReplayGainAlbumPeak,
+        // The app's edit keys (see `edit_pairs`).
+        "title" => ItemKey::TrackTitle,
+        "artist" => ItemKey::TrackArtist,
+        "album" => ItemKey::AlbumTitle,
+        "album_artist" => ItemKey::AlbumArtist,
+        "track" => ItemKey::TrackNumber,
+        "tracktotal" => ItemKey::TrackTotal,
+        "disc" => ItemKey::DiscNumber,
+        "disctotal" => ItemKey::DiscTotal,
+        "date" => ItemKey::RecordingDate,
+        "genre" => ItemKey::Genre,
+        "comment" => ItemKey::Comment,
         other => ItemKey::Unknown(other.to_string()),
     }
 }
 
 /// Writes `tags` into `path`, keeping everything else (and the file's protection as
 /// this session's output: its identity changes with its size and time).
-fn write_tags(path: &Path, tags: &[(String, String)]) -> Result<(), String> {
+/// Writes `tags` (an empty value removes the tag). "n/total" track and disc numbers
+/// are stored as number and total.
+pub(super) fn write_tags(path: &Path, tags: &[(String, String)]) -> Result<(), String> {
+    let mut expanded: Vec<(String, String)> = Vec::new();
+    for (k, v) in tags {
+        match (k.as_str(), v.split_once('/')) {
+            ("track" | "disc", Some((n, total))) => {
+                expanded.push((k.clone(), n.trim().to_string()));
+                expanded.push((format!("{k}total"), total.trim().to_string()));
+            }
+            _ => expanded.push((k.clone(), v.clone())),
+        }
+    }
+    let tags = &expanded;
     let old_key = output_key(path);
     let mut file = lofty::probe::Probe::open(path).and_then(|p| p.read()).map_err(|e| format!("Cannot read tags: {e}"))?;
     // WAV / AIFF: the ID3v2 chunk this app writes (RIFF INFO cannot hold these keys).
@@ -111,6 +136,9 @@ fn write_tags(path: &Path, tags: &[(String, String)]) -> Result<(), String> {
     for (key, value) in tags {
         let k = item_key(key);
         tag.remove_key(&k);
+        if value.is_empty() {
+            continue;
+        }
         if matches!(k, ItemKey::Unknown(_)) {
             // Free-form keys (R128_*): Vorbis comments store any name.
             if tag_type != TagType::VorbisComments {

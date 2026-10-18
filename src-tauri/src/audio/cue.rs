@@ -144,6 +144,9 @@ pub fn parse_cue(text: &str, dir: &Path, embedded: Option<&Path>) -> (Vec<ImageT
     let mut file: Option<PathBuf> = embedded.map(Path::to_path_buf);
     let mut current: Option<ImageTrack> = None;
     let mut has_start = false;
+    // Inside a TRACK block, even one that is skipped (data track, missing file): its
+    // TITLE / PERFORMER are not the album's.
+    let mut in_track = false;
 
     let finish = |t: Option<ImageTrack>, has_start: bool, tracks: &mut Vec<ImageTrack>| {
         if let Some(t) = t.filter(|_| has_start) {
@@ -170,6 +173,7 @@ pub fn parse_cue(text: &str, dir: &Path, embedded: Option<&Path>) -> (Vec<ImageT
             "TRACK" => {
                 finish(current.take(), has_start, &mut tracks);
                 has_start = false;
+                in_track = true;
                 let audio = arg(2).eq_ignore_ascii_case("AUDIO");
                 current = match (&file, audio) {
                     (Some(f), true) => Some(ImageTrack {
@@ -184,18 +188,20 @@ pub fn parse_cue(text: &str, dir: &Path, embedded: Option<&Path>) -> (Vec<ImageT
             }
             "TITLE" => match &mut current {
                 Some(t) => t.title = arg(1),
-                None => album.title = arg(1),
+                None if !in_track => album.title = arg(1),
+                None => {}
             },
             "PERFORMER" => match &mut current {
                 Some(t) => {
                     t.artist = arg(1);
                 }
-                None => album.performer = arg(1),
+                None if !in_track => album.performer = arg(1),
+                None => {}
             },
             "REM" => {
                 let key = arg(1).to_ascii_uppercase();
                 let value = w.get(2..).map(|v| v.join(" ")).unwrap_or_default();
-                if current.is_none() {
+                if !in_track {
                     match key.as_str() {
                         "DATE" => album.date = value,
                         "GENRE" => album.genre = value,
@@ -218,6 +224,14 @@ pub fn parse_cue(text: &str, dir: &Path, embedded: Option<&Path>) -> (Vec<ImageT
     }
     finish(current.take(), has_start, &mut tracks);
 
+    // Nothing before the first track of a file is lost: a hidden track or pregap before
+    // track 1's INDEX 01 becomes the start of track 1.
+    let mut seen = std::collections::HashSet::new();
+    for t in tracks.iter_mut() {
+        if seen.insert(t.audio_path.clone()) {
+            t.start = 0.0;
+        }
+    }
     // A track ends where the next track of the same file starts.
     let total = tracks.len().to_string();
     for i in 0..tracks.len() {
@@ -289,9 +303,15 @@ pub fn parse_chapters(ffmetadata: &str, audio: &Path) -> Vec<ImageTrack> {
     if in_chapter {
         push(&mut out, base, start, end, &title);
     }
-    // The last chapter runs to the end of the file.
-    if let Some(last) = out.last_mut() {
-        last.end = None;
+    // Chapters cover the whole file: the first starts at 0, each ends where the next
+    // starts (a gap between chapters stays with the earlier one), the last runs to the end.
+    out.sort_by(|a, b| a.start.total_cmp(&b.start));
+    if let Some(first) = out.first_mut() {
+        first.start = 0.0;
+    }
+    for i in 0..out.len() {
+        out[i].end = out.get(i + 1).map(|n| n.start);
+        out[i].number = i as u32 + 1;
     }
     let total = out.len().to_string();
     for t in &mut out {
@@ -323,6 +343,9 @@ pub fn read_image_tracks(path: &Path) -> ImageTracksResponse {
         };
         let dir = path.parent().unwrap_or(Path::new("."));
         let (tracks, missing) = parse_cue(&decode_cue_text(&bytes), dir, None);
+        if let Some(bad) = tracks.iter().find(|t| t.end.is_some_and(|e| e <= t.start)) {
+            return ImageTracksResponse { error: Some(format!("CUE track {} has INDEX times that do not increase", bad.number)), ..Default::default() };
+        }
         let error = tracks.is_empty().then(|| {
             if missing.is_empty() { "The CUE sheet has no audio tracks".to_string() } else { format!("Audio file not found: {}", missing.join(", ")) }
         });
@@ -332,11 +355,16 @@ pub fn read_image_tracks(path: &Path) -> ImageTracksResponse {
     let tags = crate::audio::convert::parse_ffmetadata(&meta);
     if let Some((_, sheet)) = tags.iter().find(|(k, _)| k.eq_ignore_ascii_case("cuesheet")) {
         let (tracks, _) = parse_cue(sheet, path.parent().unwrap_or(Path::new(".")), Some(path));
-        if tracks.len() >= 2 {
+        if tracks.len() >= 2 && tracks.iter().all(|t| t.end.is_none_or(|e| e > t.start)) {
             return ImageTracksResponse { success: true, tracks, ..Default::default() };
         }
     }
-    let chapters = parse_chapters(&meta, path);
+    let mut chapters = parse_chapters(&meta, path);
+    // Chapters starting at the same time would be empty tracks.
+    chapters.dedup_by(|b, a| (b.start - a.start).abs() < 1e-6);
+    for (i, t) in chapters.iter_mut().enumerate() {
+        t.number = i as u32 + 1;
+    }
     let tracks = if chapters.len() >= 2 { chapters } else { Vec::new() };
     ImageTracksResponse { success: true, tracks, ..Default::default() }
 }
@@ -501,6 +529,25 @@ mod tests {
     }
 
     #[test]
+    fn hidden_track_data_tracks_and_bad_order() {
+        let d = std::env::temp_dir().join(format!("cue-test-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a.flac"), b"x").unwrap();
+        let sheet = "TITLE \"Album\"\nFILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nTITLE \"One\"\nINDEX 00 00:00:00\nINDEX 01 01:30:00\nTRACK 02 MODE1/2352\nTITLE \"Data\"\nPERFORMER \"Nobody\"\nINDEX 01 03:00:00\nTRACK 03 AUDIO\nINDEX 01 04:00:00\n";
+        let (t, _) = parse_cue(sheet, &d, None);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].start, 0.0, "the hidden track before INDEX 01 stays in track 1");
+        assert_eq!(t[0].album, "Album", "a data track's TITLE is not the album's");
+        assert_eq!(t[0].album_artist, "");
+        let bad = "FILE \"a.flac\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\nTRACK 02 AUDIO\nINDEX 01 02:00:00\nTRACK 03 AUDIO\nINDEX 01 01:00:00\n";
+        let cue = d.join("bad.cue");
+        std::fs::write(&cue, bad).unwrap();
+        let r = read_image_tracks(&cue);
+        assert!(!r.success && r.error.unwrap().contains("do not increase"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn missing_audio_and_encodings() {
         let (t, missing) = parse_cue("FILE \"nope.wav\" WAVE\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n", Path::new("/nonexistent"), None);
         assert!(t.is_empty());
@@ -534,5 +581,9 @@ mod tests {
         assert_eq!(t.len(), 2);
         assert_eq!((t[0].start, t[0].end, t[0].title.as_str()), (0.0, Some(61.5), "Intro"));
         assert_eq!((t[1].start, t[1].end, t[1].title.as_str()), (61.5, None, "A = B"));
+        // A gap between chapters and a late first chapter are not lost.
+        let gaps = ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1\nSTART=5\nEND=10\ntitle=A\n[CHAPTER]\nTIMEBASE=1/1\nSTART=20\nEND=30\ntitle=B\n";
+        let t = parse_chapters(gaps, Path::new("/x/b.m4b"));
+        assert_eq!(t.iter().map(|t| (t.start, t.end)).collect::<Vec<_>>(), [(0.0, Some(20.0)), (20.0, None)]);
     }
 }

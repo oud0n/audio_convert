@@ -57,7 +57,9 @@ impl DsdReader {
         let bits = read_u32le(&fmt[32..]);
         let samples = read_u64le(&fmt[36..]);
         let block = read_u32le(&fmt[44..]) as usize;
-        if bits != 1 || channels == 0 || channels > 8 || block == 0 {
+        // Header values sized against what DSF allows, so a damaged header cannot ask
+        // for a huge buffer.
+        if bits != 1 || channels == 0 || channels > 8 || block == 0 || block > 1 << 20 {
             return Err("Unsupported DSF format (only 1-bit LSB-first)".into());
         }
         let mut data = [0u8; 12];
@@ -81,6 +83,9 @@ impl DsdReader {
             let size = read_u64be(&ck[4..]);
             match &ck[..4] {
                 b"PROP" => {
+                    if size > 1 << 20 {
+                        return Err("Damaged DFF header".into());
+                    }
                     let mut body = vec![0u8; size as usize];
                     file.read_exact(&mut body).map_err(|e| e.to_string())?;
                     let mut at = 4; // "SND "
@@ -98,7 +103,7 @@ impl DsdReader {
                     }
                 }
                 b"DSD " => {
-                    if channels == 0 || rate == 0 {
+                    if channels == 0 || channels > 8 || rate == 0 {
                         return Err("DFF without sound properties".into());
                     }
                     return Ok(Self { file, dff: true, channels, rate, remaining: size / u64::from(channels), block: 0 });

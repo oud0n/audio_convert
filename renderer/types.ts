@@ -86,6 +86,8 @@ export interface AudioFile {
   cuePath?: string;
   /** The track converted and passed the checks needed before its image may be trashed. */
   trashReady?: boolean;
+  /** Send every tag on conversion (rows made from an album image or a split). */
+  sendAllTags?: boolean;
   /** "Split by channels": this row is one channel (0-based) of `path`. */
   channelIndex?: number;
   /** FFmpeg name of that channel (FL, FR, FC, ...). */

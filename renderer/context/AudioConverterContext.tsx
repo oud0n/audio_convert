@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
 import { analyzeAudioBuffer } from '../utils/audioEncoder';
 import { AppBridge, isPathOnlyFile, type PathOnlyFile, type ImageTrack, type MetadataResult } from '../services/bridge';
-import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS, IMAGE_CAPABLE_EXTENSIONS, applyTagRules, renderChannelFileName, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES } from '../utils/fileNamePattern';
+import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS, IMAGE_CAPABLE_EXTENSIONS, applyTagRules, renderChannelFileName, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES, TAG_KEYS } from '../utils/fileNamePattern';
 
 interface AudioConverterContextType {
   files: AudioFile[];
@@ -104,8 +104,10 @@ function imageTrackRecords(
   fallbackBitrate: string,
   cuePath?: string,
 ): AudioFile[] {
-  const group = 'img_' + Math.random().toString(36).substring(2, 11);
+  // One group per CUE sheet (all the files it names go together), else per audio file.
+  const groupId = 'img_' + Math.random().toString(36).substring(2, 11);
   return tracks.flatMap((t) => {
+    const group = cuePath ? groupId : `${groupId}_${t.audioPath}`;
     const meta = metaByPath.get(t.audioPath);
     const format = meta?.success ? meta.format : undefined;
     if (!format) return [];
@@ -144,6 +146,7 @@ function imageTrackRecords(
       tags,
       // Every tag of the track is sent (the converter drops the image's own title / numbering).
       sourceTags: emptyTags(),
+      sendAllTags: true,
       sourceLossless: typeof format.lossless === 'boolean' ? format.lossless : undefined,
       trackStart: t.start,
       trackEnd: t.end ?? undefined,
@@ -268,7 +271,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   /** Files of the running batch (files added while it runs are not part of it). */
   const batchFileIdsRef = useRef<Set<string>>(new Set());
   /** Album images in the running batch: their tracks, and those ready for the trash. */
-  const imageGroupsRef = useRef<Map<string, { path: string; cuePath?: string; ids: Set<string>; ready: Set<string> }>>(new Map());
+  const imageGroupsRef = useRef<Map<string, { paths: Set<string>; cuePath?: string; ids: Set<string>; ready: Set<string> }>>(new Map());
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   useEffect(() => {
@@ -1015,15 +1018,49 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
 
     setIsConverting(true);
     activeConversionTabIdRef.current = targetTabId;
+    jobCancelledRef.current = false;
     let tabFiles = currentTab.files;
-    if ((currentTab.settings.actionMode ?? 'encode') === 'split' && AppBridge.isAvailable()) {
+    const actionNow = currentTab.settings.actionMode ?? 'encode';
+    if (actionNow === 'extract' || actionNow === 'copy') {
+      // Extract and Copy work on whole files: the track rows of an album image become
+      // one row for the file again.
+      const byGroup = new Map<string, AudioFile[]>();
+      for (const f of queued) {
+        if (f.trackStart === undefined || !f.imageGroup) continue;
+        const key = `${f.imageGroup}\u0000${f.path}`;
+        byGroup.set(key, [...(byGroup.get(key) ?? []), f]);
+      }
+      if (byGroup.size) {
+        const replaced = new Map<string, AudioFile[]>();
+        for (const rows of Array.from(byGroup.values())) {
+          const first = rows[0];
+          replaced.set(first.id, [{
+            ...first,
+            id: Math.random().toString(36).substring(2, 11),
+            name: baseName(first.path || first.name),
+            trackStart: undefined, trackEnd: undefined, imageGroup: undefined, cuePath: undefined,
+            sendAllTags: undefined, tags: emptyTags(), sourceTags: emptyTags(),
+          }]);
+          rows.slice(1).forEach(r => replaced.set(r.id, []));
+        }
+        const collapse = (files: AudioFile[]) => files.flatMap(f => replaced.get(f.id) ?? [f]);
+        queued = collapse(queued);
+        tabFiles = collapse(tabFiles);
+        tabsRef.current = tabsRef.current.map(t => t.id === targetTabId ? { ...t, files: collapse(t.files) } : t);
+        setTabs(prev => prev.map(t => t.id === targetTabId ? { ...t, files: collapse(t.files) } : t));
+      }
+    }
+    if (actionNow === 'split' && AppBridge.isAvailable()) {
       // One row per channel of each multichannel source.
       const replaced = new Map<string, AudioFile[]>();
       for (const f of queued) {
-        if (f.channelIndex !== undefined || !f.path || f.channels < 2) continue;
+        if (f.channelIndex !== undefined || !f.path) continue;
+        // The file's own channel count (the row's `channels` follows the tab settings
+        // after "Reset queue").
         const names = await AppBridge.channelNames(f.path).catch(() => [] as string[]);
+        if (names.length < 2) continue;
         const group = f.imageGroup ?? 'ch_' + Math.random().toString(36).substring(2, 11);
-        replaced.set(f.id, Array.from({ length: f.channels }, (_, c) => ({
+        replaced.set(f.id, Array.from({ length: names.length }, (_, c) => ({
           ...f,
           id: Math.random().toString(36).substring(2, 11),
           name: `${String(c + 1).padStart(2, '0')} ${names[c] || `c${c + 1}`} ${f.name}`,
@@ -1084,15 +1121,22 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         addLogToTab(targetTabId, lang === 'ja' ? `${replaced.size} 個のファイルを分割しました（${split === 'time' ? '時間' : '無音'}）。` : `Split ${replaced.size} files (by ${split}).`, 'info');
       }
     }
+    if (jobCancelledRef.current) {
+      // Stopped while the files were being examined: nothing was converted.
+      setIsConverting(false);
+      activeConversionTabIdRef.current = null;
+      addLogToTab(targetTabId, lang === 'ja' ? 'バッチを開始前に中断しました。' : 'Batch stopped before it started.', 'info');
+      return;
+    }
     batchRef.current = { success: 0, failed: 0, warnings: 0 };
     conversionQueueRef.current = queued.map((f) => f.id);
     batchFileIdsRef.current = new Set(queued.map((f) => f.id));
     batchOutputsRef.current = [];
-    jobCancelledRef.current = false;
-    const groups = new Map<string, { path: string; cuePath?: string; ids: Set<string>; ready: Set<string> }>();
+    const groups = new Map<string, { paths: Set<string>; cuePath?: string; ids: Set<string>; ready: Set<string> }>();
     for (const f of tabFiles) {
       if (!f.imageGroup || !f.path) continue;
-      const g = groups.get(f.imageGroup) ?? { path: f.path, cuePath: f.cuePath, ids: new Set<string>(), ready: new Set<string>() };
+      const g = groups.get(f.imageGroup) ?? { paths: new Set<string>(), cuePath: f.cuePath, ids: new Set<string>(), ready: new Set<string>() };
+      g.paths.add(f.path);
       g.ids.add(f.id);
       if (f.status === 'completed' && f.trashReady && !f.originalDeleted) g.ready.add(f.id);
       groups.set(f.imageGroup, g);
@@ -1169,8 +1213,14 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       if (!checksPassed) batchRef.current.warnings++;
       let originalDeleted = false;
       if (tabSettings.deleteOriginalAfterConvert && checksPassed && !job.cancelled) {
-        // Each source once, then the CUE sheets of image tracks.
-        const paths = Array.from(new Set([...files.map(f => f.path || ''), ...files.map(f => f.cuePath || '')].filter(Boolean)));
+        // Each source once, then the CUE sheets of image tracks. An album image (or a
+        // split source) goes only when all of its rows were merged here.
+        const tabRows = tabsRef.current.find(t => t.id === tabId)?.files ?? [];
+        const whole = (f: AudioFile) => !f.imageGroup || tabRows.filter(r => r.imageGroup === f.imageGroup).every(r => ids.has(r.id));
+        const kept = files.filter(f => !whole(f));
+        if (kept.length) addLogToTab(tabId, lang === 'ja' ? '一部のトラックだけを結合したアルバムの元ファイルは残しました。' : 'Kept album files of which only some tracks were merged.', 'info');
+        const merged = files.filter(whole);
+        const paths = Array.from(new Set([...merged.map(f => f.path || ''), ...merged.map(f => f.cuePath || '')].filter(Boolean)));
         originalDeleted = true;
         for (const p of paths) {
           if (p === res.path) continue;
@@ -1224,13 +1274,18 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     imageGroupsRef.current = new Map();
     for (const [group, g] of Array.from(groups.entries())) {
       if (g.ready.size !== g.ids.size) continue;
-      const result = await AppBridge.trashFile(g.path).catch((e: any) => ({ success: false, error: String(e?.message || e) }));
-      if (!result?.success) {
-        batchRef.current.warnings++;
-        addLogToTab(tabId, lang === 'ja' ? `元ファイルのゴミ箱への移動に失敗しました: "${g.path}": ${result?.error}` : `Failed to move the original to the trash: "${g.path}": ${result?.error}`, 'error');
-        continue;
+      let allTrashed = true;
+      for (const path of Array.from(g.paths)) {
+        const result = await AppBridge.trashFile(path).catch((e: any) => ({ success: false, error: String(e?.message || e) }));
+        if (!result?.success) {
+          allTrashed = false;
+          batchRef.current.warnings++;
+          addLogToTab(tabId, lang === 'ja' ? `元ファイルのゴミ箱への移動に失敗しました: "${path}": ${result?.error}` : `Failed to move the original to the trash: "${path}": ${result?.error}`, 'error');
+          continue;
+        }
+        addLogToTab(tabId, lang === 'ja' ? `全トラックの変換が終わったため元ファイルをゴミ箱に移動しました: "${path}"` : `All tracks done; moved the original to the trash: "${path}"`, 'success');
       }
-      addLogToTab(tabId, lang === 'ja' ? `全トラックの変換が終わったため元ファイルをゴミ箱に移動しました: "${g.path}"` : `All tracks done; moved the original to the trash: "${g.path}"`, 'success');
+      if (!allTrashed) continue;
       if (g.cuePath) {
         const cue = await AppBridge.trashFile(g.cuePath).catch(() => null);
         if (!cue?.success) addLogToTab(tabId, lang === 'ja' ? `CUE シートをゴミ箱に移動できませんでした: "${g.cuePath}"` : `Could not move the CUE sheet to the trash: "${g.cuePath}"`, 'error');
@@ -1255,8 +1310,14 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       groups.set(key, [...(groups.get(key) ?? []), o.path]);
     });
     addLogToTab(tabId, lang === 'ja' ? 'ReplayGain を測定してタグに書き込んでいます...' : 'Measuring loudness and writing ReplayGain tags...', 'info');
+    // A job of its own, so Stop also stops the measurement.
+    const job = { id: crypto.randomUUID(), cancelled: false };
+    jobRef.current = job;
+    await AppBridge.startConversionJob(job.id).catch(() => {});
+    try {
     for (const paths of Array.from(groups.values())) {
-      const res = await AppBridge.writeLoudnessTags(paths, mode === 'album' && paths.length > 1)
+      if (job.cancelled) break;
+      const res = await AppBridge.writeLoudnessTags(paths, mode === 'album' && paths.length > 1, job.id)
         .catch((e: any) => ({ success: false, results: [] as Array<{ path: string; error?: string | null }>, albumGainDb: null, error: String(e?.message || e) }));
       for (const r of res.results) {
         if (r.error) addLogToTab(tabId, `ReplayGain: "${r.path}": ${r.error}`, 'error');
@@ -1269,13 +1330,18 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         addLogToTab(tabId, lang === 'ja' ? `ReplayGain を書き込みました: ${paths.length} ファイル${album}` : `Wrote ReplayGain tags: ${paths.length} files${album}`, 'success');
       }
     }
+    } finally {
+      await AppBridge.finishConversionJob(job.id).catch(() => {});
+      jobRef.current = null;
+    }
   };
 
   const finishBatch = async (targetTabId: string) => {
     // Not after a cancel: the user stopped the batch.
     if (batchRef.current.success && !jobCancelledRef.current) await writeReplayGain(targetTabId);
     else batchOutputsRef.current = [];
-    await trashFinishedImages(targetTabId);
+    if (jobCancelledRef.current) imageGroupsRef.current = new Map();
+    else await trashFinishedImages(targetTabId);
     setIsConverting(false);
     activeConversionIdRef.current = null;
     activeConversionTabIdRef.current = null;
@@ -1300,7 +1366,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     // the queue. After a failure (or a quality warning) the queue stays as it is, and
     // the failed files' sources were never moved to the trash.
     const batchIds = batchFileIdsRef.current;
-    if (!failed && !warnings) {
+    if (!failed && !warnings && !jobCancelledRef.current) {
       setTabs(prev => prev.map(t => t.id === targetTabId ? {
         ...t,
         files: t.files.filter((f) => !batchIds.has(f.id)),
@@ -1377,7 +1443,10 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           fileName: finalExportName,
           outputFormat: fileRecord.outputFormat,
           // Only edited tags; the converter copies everything else from the source.
-          tags: editedTags(outTags, fileRecord.sourceTags),
+          tags: fileRecord.sendAllTags
+            // A track gets every tag (an emptied one clears the image's value).
+            ? Object.fromEntries(TAG_KEYS.map(k => [k, outTags[k] ?? '']))
+            : editedTags(outTags, fileRecord.sourceTags),
           startSeconds: fileRecord.trackStart ?? null,
           endSeconds: fileRecord.trackEnd ?? null,
           channel: fileRecord.channelIndex ?? null,
@@ -1502,14 +1571,14 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               gainMultiplier: gainMult,
               originalDeleted: originalDeleted,
               verificationResult: verificationResult,
-              trashReady: !!fileRecord.imageGroup && checksPassed,
+              trashReady: !!fileRecord.imageGroup && checksPassed && tabSettings.deleteOriginalAfterConvert,
             } : f)
           };
         }
         return t;
       }));
 
-      if (fileRecord.imageGroup && checksPassed) imageGroupsRef.current.get(fileRecord.imageGroup)?.ready.add(id);
+      if (fileRecord.imageGroup && checksPassed && tabSettings.deleteOriginalAfterConvert) imageGroupsRef.current.get(fileRecord.imageGroup)?.ready.add(id);
       const albumName = (fileRecord.tags.album || '').trim();
       batchOutputsRef.current.push({
         path: savedOutputPath,

@@ -139,6 +139,26 @@ fn verify_parts(ctx: &JobCtx, request: &MergeRequest, sources: &[(PathBuf, Sourc
     Ok((true, format!("All {} parts are bit-exact with their sources", sources.len())))
 }
 
+/// Samples per channel `path` decodes to through `filters`.
+fn count_samples(ffmpeg: &Path, path: &Path, filters: &str) -> Result<u64, String> {
+    let mut child = hidden_command(ffmpeg)
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(path)
+        .args(["-map", "0:a:0", "-af", &format!("{filters},pan=mono|c0=c0,aformat=sample_fmts=s16"), "-f", "s16le", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to start FFmpeg: {e}"))?;
+    let mut out = child.stdout.take().ok_or("no output")?;
+    let bytes = std::io::copy(&mut out, &mut std::io::sink()).map_err(|e| e.to_string())?;
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(format!("Cannot decode {}", path.display()));
+    }
+    Ok(bytes / 2)
+}
+
 /// Joins the inputs as channels: input 1 gives the first channel(s), and so on; the
 /// result has the standard layout for the channel count. Shorter inputs end in silence.
 fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String> {
@@ -169,8 +189,10 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
     for (path, _) in &sources {
         args.extend(["-i".into(), path.to_string_lossy().into_owned()]);
     }
-    let mut graph = String::new();
-    for (n, ((_, info), input)) in sources.iter().zip(&request.inputs).enumerate() {
+    // Each input's filters (cut, relabel, resample), and its exact length in samples
+    // after them: shorter inputs are padded to the longest, sample for sample.
+    let mut chains = Vec::new();
+    for ((_, info), input) in sources.iter().zip(&request.inputs) {
         let mut f = Vec::new();
         if let Some(range) = input_range(input) {
             f.push(trim_filter(range, info.sample_rate));
@@ -184,13 +206,29 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
             f.push(resample_filter(rate));
         }
         f.push(format!("aformat=sample_fmts={sample_fmt}"));
-        f.push(format!("apad=whole_dur={longest:.6}"));
-        graph.push_str(&format!("[{n}:a:0]{}[a{n}];", f.join(",")));
+        chains.push(f);
+    }
+    let mut lengths = Vec::new();
+    for ((path, _), f) in sources.iter().zip(&chains) {
+        ctx.check()?;
+        lengths.push(count_samples(&ffmpeg, path, &f.join(","))?);
+    }
+    let longest_samples = lengths.iter().copied().max().unwrap_or(0);
+    // `join` places each input channel at a named output channel: a pure mapping (amerge
+    // would give 3 or 4 channels a default layout and then remix them).
+    let targets = layout_channel_names(&layout_name(total), total);
+    let mut map = Vec::new();
+    let mut graph = String::new();
+    for (n, ((_, info), f)) in sources.iter().zip(&chains).enumerate() {
+        graph.push_str(&format!("[{n}:a:0]{},apad=whole_len={longest_samples}[a{n}];", f.join(",")));
+        for c in 0..info.channels.unwrap_or(1).max(1) {
+            map.push(format!("{n}.{c}-{}", targets[map.len()]));
+        }
     }
     for n in 0..sources.len() {
         graph.push_str(&format!("[a{n}]"));
     }
-    graph.push_str(&format!("amerge=inputs={},aformat=channel_layouts={}[out]", sources.len(), layout_name(total)));
+    graph.push_str(&format!("join=inputs={}:channel_layout={}:map={}[out]", sources.len(), layout_name(total), map.join("|")));
     args.extend(["-filter_complex".into(), graph, "-map".into(), "[out]".into(), "-c:a".into(), codec.into()]);
     if codec == "flac" {
         args.extend(["-compression_level".into(), "0".into(), "-frame_size".into(), "4096".into(), "-bits_per_raw_sample".into(), (if bits > 16 { 24 } else { 16 }).to_string()]);
@@ -201,12 +239,15 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
     run_ffmpeg(ctx, &ffmpeg, &args, longest, "decoding")?;
     ctx.check()?;
 
+    // The joined channels are the point: an explicit channel setting does not apply.
+    let mut join_settings = request.settings.clone();
+    join_settings.channels = Some(total);
     let convert = ConvertRequest {
         input_file_path: joined.to_string_lossy().into_owned(),
         file_name: request.file_name.clone(),
         output_format: request.output_format.clone(),
         job_id: request.job_id.clone(),
-        settings: request.settings.clone(),
+        settings: join_settings,
         tags: request.tags.clone(),
         start_seconds: None,
         end_seconds: None,
@@ -227,15 +268,21 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
         let cancelled = || ctx.cancelled();
         for (n, ((path, info), input)) in sources.iter().zip(&request.inputs).enumerate() {
             let count = info.channels.unwrap_or(1).max(1);
-            let same_shape = info.sample_rate == Some(rate) && info.duration >= longest - 0.001 && info.is_float == out.is_float;
-            if !same_shape || count != 1 {
-                result = (false, format!("Input {} was resampled, padded or has several channels, so it cannot be compared bit for bit", n + 1));
+            let same_shape = info.sample_rate == Some(rate) && lengths[n] == longest_samples && info.is_float == out.is_float;
+            if !same_shape {
+                result = (false, format!("Input {} was resampled or padded, so it cannot be compared bit for bit", n + 1));
                 break;
             }
-            let a = crate::audio::audit::compute_pcm_fingerprint_part(&path.to_string_lossy(), input_range(input), None, &cancelled).map_err(|e| e.to_string())?;
-            let b = crate::audio::audit::compute_pcm_fingerprint_part(&converted.path.to_string_lossy(), None, Some(first_channel), &cancelled).map_err(|e| e.to_string())?;
-            if a != b {
-                result = (false, format!("Input {} differs from its channel", n + 1));
+            for c in 0..count {
+                let one = (count > 1).then_some(c);
+                let a = crate::audio::audit::compute_pcm_fingerprint_part(&path.to_string_lossy(), input_range(input), one, &cancelled).map_err(|e| e.to_string())?;
+                let b = crate::audio::audit::compute_pcm_fingerprint_part(&converted.path.to_string_lossy(), None, Some(first_channel + c), &cancelled).map_err(|e| e.to_string())?;
+                if a != b {
+                    result = (false, format!("Input {} differs from its channel", n + 1));
+                    break;
+                }
+            }
+            if !result.0 {
                 break;
             }
             first_channel += count;
