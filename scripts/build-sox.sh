@@ -68,6 +68,12 @@ mkdir sox
 tar -xzf "$NAME" -C sox --strip-components=1
 cd sox
 
+# UCRT (MSYS2 UCRT64) hides FILE's fields, which SoX's pipe-rewind hack (only for
+# guessing the format of a pipe; the app always names it) reads: treat UCRT like newer
+# MSVC, which has no such hack.
+sed -i.orig 's/^#elif defined _MSC_VER \&\& _MSC_VER >= 1900$/#elif (defined _MSC_VER \&\& _MSC_VER >= 1900) || defined _UCRT/' src/formats.c
+grep -q 'defined _UCRT' src/formats.c || { echo "patching src/formats.c failed" >&2; exit 1; }
+
 autoreconf -i >/dev/null 2>&1 || autoreconf -i
 
 # Only the built-in formats (WAV in, DSF out) and effects are needed: every optional
@@ -98,6 +104,9 @@ strip "$BIN" 2>/dev/null || true
   echo
   echo "Source: https://github.com/mansr/sox (commit $COMMIT)"
   echo "Archive: $URL"
+  echo
+  echo "Modification: in src/formats.c, the pipe-rewind hack is also disabled for the"
+  echo "Windows UCRT C runtime (one preprocessor condition, see scripts/build-sox.sh)."
   echo
   echo "Built without any optional libraries, with:"
   echo "  ./configure ${FLAGS[*]}"
