@@ -99,6 +99,11 @@ fn kept_source_folders_take_first_or_last_levels() {
     assert_eq!(kept_source_folders(input, 2, true), ["Music", "Artist"]);
     assert_eq!(kept_source_folders(input, 0, false), Vec::<String>::new());
     assert_eq!(kept_source_folders(input, 9, false), ["Music", "Artist", "Album", "CD1"]);
+    // "First" counts below the home folder or the volume, not from the root.
+    let home = dirs::home_dir().unwrap();
+    assert_eq!(kept_source_folders(&home.join("Music/Rock/Queen/x.flac"), 2, true), ["Music", "Rock"]);
+    assert_eq!(kept_source_folders(Path::new("/Volumes/USB/Music/Rock/x.flac"), 1, true), ["Music"]);
+    assert_eq!(kept_source_folders(Path::new("/media/al/Disk/A/B/x.flac"), 2, true), ["A", "B"]);
 }
 
 #[test]
@@ -759,6 +764,25 @@ fn dsd_sources_convert_to_pcm_dsf_and_dop() {
         assert_eq!(r.status, "perfect", "{format}");
     }
     assert_eq!(dsd::dop_matches(&dsf, &pcm, &|| false).unwrap(), None, "plain PCM is not DoP");
+    // DoP of a longer recording with the same start is not a match (trailing audio).
+    let longer = d.0.join("longer.dsf");
+    dsd::test_util::write_test_dsf(&longer, 0.6, 2);
+    let mut req = request(&longer, &out, "FLAC", "dop_long");
+    req.settings.dop = Some(true);
+    let (dop_long, _) = convert_blocking(&ctx(), &req).unwrap();
+    assert_eq!(dsd::dop_matches(&dsf, &dop_long, &|| false).unwrap(), Some(false));
+    // An odd number of DSD bytes: the last byte is checked too.
+    let (_, rate, mut odd) = dsd_bits(&dsf);
+    for c in odd.iter_mut() {
+        c.truncate(c.len() - 1 - (c.len() % 2));
+    }
+    let odd_dff = d.0.join("odd.dff");
+    dsd::test_util::write_test_dff(&odd_dff, rate, &odd, 0);
+    let mut req = request(&odd_dff, &out, "FLAC", "dop_odd");
+    req.settings.dop = Some(true);
+    let (dop_odd, _) = convert_blocking(&ctx(), &req).unwrap();
+    assert_eq!(dsd::dop_matches(&odd_dff, &dop_odd, &|| false).unwrap(), Some(true));
+    assert_eq!(dsd::dop_matches(&dsf, &dop_odd, &|| false).unwrap(), Some(false), "the source has more bits");
 
     // PCM sources cannot become DSD.
     let wav = d.0.join("a.wav");
@@ -1427,6 +1451,24 @@ fn verification_sees_24_bit_and_multichannel_differences() {
     let (mp3, _) = convert_blocking(&ctx(), &request(&six, &d.0.join("out"), "MP3", "down")).unwrap();
     let r = crate::audio::audit::verify_quality_blocking(&six.to_string_lossy(), &mp3.to_string_lossy(), false, &|| false).result.unwrap();
     assert!(r.correlation_percent.unwrap() > 95.0, "{:?}", r.correlation_percent);
+}
+
+#[test]
+fn a_cut_off_output_does_not_pass_verification() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let src = d.0.join("long.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=5", src.to_str().unwrap()]);
+    let cut = d.0.join("cut.mp3");
+    ffmpeg(&["-i", src.to_str().unwrap(), "-t", "1", cut.to_str().unwrap()]);
+    let r = crate::audio::audit::verify_quality_blocking(&src.to_string_lossy(), &cut.to_string_lossy(), false, &|| false).result.unwrap();
+    assert_eq!(r.status, "degraded", "{}", r.summary_message);
+    let full = d.0.join("full.mp3");
+    ffmpeg(&["-i", src.to_str().unwrap(), full.to_str().unwrap()]);
+    let r = crate::audio::audit::verify_quality_blocking(&src.to_string_lossy(), &full.to_string_lossy(), false, &|| false).result.unwrap();
+    assert_ne!(r.status, "degraded", "a complete output is not flagged for its length: {}", r.summary_message);
 }
 
 #[test]

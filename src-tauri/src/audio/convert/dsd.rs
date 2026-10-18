@@ -91,7 +91,8 @@ impl DsdReader {
                     let mut at = 4; // "SND "
                     while at + 12 <= body.len() {
                         let id = &body[at..at + 4];
-                        let len = read_u64be(&body[at + 4..]) as usize;
+                        // Bounded by the (already bounded) PROP chunk.
+                        let len = (read_u64be(&body[at + 4..]).min(body.len() as u64)) as usize;
                         let v = &body[at + 12..(at + 12 + len).min(body.len())];
                         match id {
                             b"FS  " if v.len() >= 4 => rate = u32::from_be_bytes([v[0], v[1], v[2], v[3]]),
@@ -109,7 +110,8 @@ impl DsdReader {
                     return Ok(Self { file, dff: true, channels, rate, remaining: size / u64::from(channels), block: 0 });
                 }
                 _ => {
-                    file.seek_relative(size as i64 + (size & 1) as i64).map_err(|e| e.to_string())?;
+                    let skip = i64::try_from(size + (size & 1)).map_err(|_| "Damaged DFF header".to_string())?;
+                    file.seek_relative(skip).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -310,10 +312,18 @@ pub fn dop_matches(original: &Path, converted: &Path, cancelled: &dyn Fn() -> bo
     let result = (|| -> Result<Option<bool>, String> {
         let mut first = true;
         let mut frame = vec![0u8; 4 * ch];
+        // One frame holds two DSD bytes per channel; a stream with an odd byte count
+        // ends with that byte and DSD silence (as `write_dop` pads it).
+        let mut carry: Vec<Vec<u8>> = vec![Vec::new(); ch];
         while let Some(chunk) = reader.next_chunk()? {
             if cancelled() {
                 return Err(crate::audio::audit::CANCELLED.into());
             }
+            for (c, part) in carry.iter_mut().zip(chunk) {
+                c.extend(part);
+            }
+            let even = carry[0].len() & !1;
+            let chunk: Vec<Vec<u8>> = carry.iter_mut().map(|c| c.drain(..even).collect()).collect();
             let mut i = 0;
             while i + 1 < chunk[0].len() {
                 if pcm.read_exact(&mut frame).is_err() {
@@ -332,8 +342,22 @@ pub fn dop_matches(original: &Path, converted: &Path, cancelled: &dyn Fn() -> bo
                 first = false;
                 i += 2;
             }
-            // DSF blocks hold an even number of bytes, so pairs never span chunks except
-            // at the very end (padded with silence when written).
+        }
+        if !carry[0].is_empty() {
+            if pcm.read_exact(&mut frame).is_err() {
+                return Ok(Some(false));
+            }
+            for (c, data) in carry.iter().enumerate() {
+                let v = u32::from_le_bytes(frame[4 * c..4 * c + 4].try_into().unwrap()) >> 8;
+                if (v & 0xFFFF) != (u32::from(data[0]) << 8 | u32::from(DSD_SILENCE)) {
+                    return Ok(Some(false));
+                }
+            }
+            first = false;
+        }
+        // Nothing may follow the source's bits.
+        if pcm.read_exact(&mut frame).is_ok() {
+            return Ok(Some(false));
         }
         Ok(Some(!first))
     })();

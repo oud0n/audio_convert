@@ -469,20 +469,41 @@ pub fn output_name_parts(requested: &str, input_path: &Path) -> (Vec<String>, St
     (parts.into_iter().map(safe_file_name).collect(), safe_file_name(&stem))
 }
 
+/// Where "first N folders" start counting: the home folder, or the volume / drive the
+/// file is on (so "first 2" of ~/Music/Rock/x.flac is Music/Rock, not Users/alice).
+fn folder_count_base(dir: &Path) -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        if dir.starts_with(&home) {
+            return home;
+        }
+    }
+    let parts: Vec<std::path::Component> = dir.components().collect();
+    let names: Vec<String> = parts.iter().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+    // Mount points: /Volumes/X (macOS), /media/user/X and /run/media/user/X, /mnt/X (Linux).
+    let skip = match names.get(1).map(String::as_str) {
+        Some("Volumes") | Some("mnt") => 3,
+        Some("media") => 4,
+        Some("run") if names.get(2).map(String::as_str) == Some("media") => 5,
+        _ => 1, // the root, or the drive on Windows (prefix + root)
+    };
+    let skip = if names.first().is_some_and(|n| n.ends_with(':') || n.starts_with(r"\\")) { 2 } else { skip };
+    parts.iter().take(skip.min(parts.len())).collect()
+}
+
 /// The source's folders to recreate under the output folder (xrecode "keep folder
-/// structure"): the last or first `levels` folders of the source's path.
+/// structure"): the last `levels` folders of the source's path, or the first ones below
+/// the home folder / volume.
 pub fn kept_source_folders(input: &Path, levels: u32, from_start: bool) -> Vec<String> {
-    let folders: Vec<String> = input
-        .parent()
-        .map(|p| {
-            p.components()
-                .filter_map(|c| match c {
-                    std::path::Component::Normal(n) => Some(safe_file_name(&n.to_string_lossy())),
-                    _ => None,
-                })
-                .collect()
+    let parent = input.parent().map(Path::to_path_buf).unwrap_or_default();
+    let base = if from_start { folder_count_base(&parent) } else { PathBuf::new() };
+    let below = parent.strip_prefix(&base).unwrap_or(&parent);
+    let folders: Vec<String> = below
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(safe_file_name(&n.to_string_lossy())),
+            _ => None,
         })
-        .unwrap_or_default();
+        .collect();
     let n = (levels as usize).min(folders.len());
     if from_start { folders[..n].to_vec() } else { folders[folders.len() - n..].to_vec() }
 }

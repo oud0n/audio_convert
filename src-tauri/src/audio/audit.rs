@@ -237,6 +237,8 @@ struct DiffMetrics {
     max_diff_db: f64,
     snr_db: f64,
     correlation_percent: f64,
+    /// How much longer or shorter the converted audio is, in seconds.
+    length_diff_seconds: f64,
 }
 
 /// Running sums for the waveform comparison, over 32-bit float samples (full scale 1.0)
@@ -282,7 +284,7 @@ impl DiffAccumulator {
             (self.dot / self.count) / (p1 * p2).sqrt()
         };
         let correlation_percent = ((correlation * 10000.0).round() / 100.0).clamp(0.0, 100.0);
-        Ok(DiffMetrics { max_diff_db, snr_db, correlation_percent })
+        Ok(DiffMetrics { max_diff_db, snr_db, correlation_percent, length_diff_seconds: 0.0 })
     }
 }
 
@@ -353,12 +355,15 @@ fn compare_files(
         let mut bb = vec![0u8; frame * 8192];
         let (mut all, mut body) = (DiffAccumulator::default(), DiffAccumulator::default());
         let mut index = 0usize;
+        let (mut total_a, mut total_b) = (0u64, 0u64);
         loop {
             if cancelled() {
                 return Err(CANCELLED.into());
             }
             let na = read_full(&mut ra, &mut ba)?;
             let nb = read_full(&mut rb, &mut bb)?;
+            total_a += na as u64;
+            total_b += nb as u64;
             let n = na.min(nb) / 4 * 4;
             for (x, y) in ba[..n].chunks_exact(4).zip(bb[..n].chunks_exact(4)) {
                 let s1 = f64::from(f32::from_le_bytes([x[0], x[1], x[2], x[3]]));
@@ -373,7 +378,13 @@ fn compare_files(
                 break;
             }
         }
-        if body.count > 0.0 { body.finish() } else { all.finish() }
+        // The rest of the longer stream: a cut-off output must not pass on its prefix.
+        total_a += std::io::copy(&mut ra, &mut std::io::sink())?;
+        total_b += std::io::copy(&mut rb, &mut std::io::sink())?;
+        let mut metrics = if body.count > 0.0 { body.finish() } else { all.finish() }?;
+        let rate = f64::from(out.sample_rate.unwrap_or(48000).max(1));
+        metrics.length_diff_seconds = (total_b as f64 - total_a as f64) / frame as f64 / rate;
+        Ok(metrics)
     })();
     for child in [&mut a, &mut b] {
         let _ = child.kill();
@@ -543,7 +554,13 @@ pub fn verify_quality_part(
         }
     };
 
-    let (status, summary) = if metrics.correlation_percent >= 99.0 && metrics.snr_db >= 30.0 {
+    // Encoder delay and padding change the length by a few milliseconds at most.
+    let (status, summary) = if metrics.length_diff_seconds.abs() > 0.1 {
+        (
+            "degraded".to_string(),
+            format!("長さが元ファイルと {:+.2} 秒違います（出力が途中で切れている可能性）", metrics.length_diff_seconds),
+        )
+    } else if metrics.correlation_percent >= 99.0 && metrics.snr_db >= 30.0 {
         if is_lossless_pair {
             (
                 "warning".to_string(),
@@ -585,6 +602,7 @@ pub fn verify_quality_part(
         format!("波形類似度 (相関率): {}%", metrics.correlation_percent),
         format!("S/N比 (Signal-to-Noise Ratio): {} dB", metrics.snr_db),
         format!("最大波形差分ピーク: {} dB", metrics.max_diff_db),
+        format!("長さの差: {:+.3} 秒", metrics.length_diff_seconds),
         "高周波カットオフ: 未測定".to_string(),
     ];
 

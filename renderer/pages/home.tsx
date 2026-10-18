@@ -1735,8 +1735,10 @@ export default function HomeDashboardPage() {
                   {settings.outputFormat}
                 </span>
                 <span className="text-zinc-500 font-mono text-[10px]">
-                  {LOSSLESS_OUTPUT_FORMATS.includes((settings.outputFormat || '').toUpperCase())
-                    ? (settings.sameAsSource ? 'Lossless (Same as Source)' : `${settings.bitDepth}-bit Lossless`)
+                  {settings.actionMode === 'extract' || settings.actionMode === 'copy'
+                    ? (settings.actionMode === 'extract' ? 'Extract (no re-encoding)' : 'Copy (no re-encoding)')
+                  : LOSSLESS_OUTPUT_FORMATS.includes((settings.outputFormat || '').toUpperCase())
+                    ? `${settings.sameAsSource ? 'Lossless (Same as Source)' : `${settings.bitDepth}-bit Lossless`}${settings.actionMode === 'split' ? ' · mono per channel' : settings.actionMode === 'encode_multi' ? ' · joined channels' : ''}`
                     : settings.bitrateMode === 'vbr' && VBR_FORMATS.includes((settings.outputFormat || '').toUpperCase())
                       ? `VBR V${settings.vbrQuality ?? 2}`
                       : `${settings.bitrate} kbps`
