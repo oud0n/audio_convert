@@ -38,6 +38,30 @@ export interface ConvertResult {
   gainDb?: number | null;
 }
 
+/** A track of an album image (CUE sheet, embedded CUESHEET or chapter). */
+export interface ImageTrack {
+  audioPath: string;
+  number: number;
+  start: number;
+  end: number | null;
+  title: string;
+  artist: string;
+  album: string;
+  albumArtist: string;
+  year: string;
+  genre: string;
+  comment: string;
+  disc: string;
+  totalTracks: string;
+}
+
+export interface ImageTracksResult {
+  success: boolean;
+  tracks: ImageTrack[];
+  missing: string[];
+  error?: string | null;
+}
+
 export interface VerificationResponse {
   success: boolean;
   result?: QualityVerificationResult;
@@ -113,6 +137,16 @@ export class AppBridge {
       return await ipc.invoke<MetadataResult>('read-audio-metadata', filePath);
     }
     throw new Error('No desktop runtime detected');
+  }
+
+  /** Tracks of a .cue file, or of an audio file with an embedded CUE sheet or chapters
+   * (empty for an ordinary file). Tauri only. */
+  static async readImageTracks(path: string): Promise<ImageTracksResult> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<ImageTracksResult>('read_image_tracks_command', { path });
+    }
+    return { success: true, tracks: [], missing: [] };
   }
 
   /** Native picker for audio files or folders (Tauri only; paths, not file contents). */
@@ -211,11 +245,13 @@ export class AppBridge {
   }
 
   /** Decodes a file for the waveform/player; `cancelPreview(requestId)` stops it. */
-  static async decodeAudioToWav(filePath: string, requestId?: number): Promise<ArrayBuffer> {
+  static async decodeAudioToWav(filePath: string, requestId?: number, range?: { start?: number; end?: number }): Promise<ArrayBuffer> {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core');
       // The backend answers with raw bytes (an ArrayBuffer).
-      const data = await invoke<ArrayBuffer | number[] | Uint8Array>('decode_audio_to_wav', { filePath, requestId });
+      const data = await invoke<ArrayBuffer | number[] | Uint8Array>('decode_audio_to_wav', {
+        filePath, requestId, startSeconds: range?.start ?? null, endSeconds: range?.end ?? null,
+      });
       if (data instanceof ArrayBuffer) return data;
       if (data instanceof Uint8Array) {
         return (data.buffer as ArrayBuffer).slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
@@ -234,6 +270,9 @@ export class AppBridge {
     convertedPath: string;
     isLosslessPair: boolean;
     jobId?: string;
+    /** Range of an album-image track inside the original (seconds). */
+    startSeconds?: number;
+    endSeconds?: number;
   }): Promise<VerificationResponse> {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -242,6 +281,8 @@ export class AppBridge {
         convertedPath: params.convertedPath,
         isLosslessPair: params.isLosslessPair,
         jobId: params.jobId,
+        startSeconds: params.startSeconds ?? null,
+        endSeconds: params.endSeconds ?? null,
       });
     }
     const ipc = getIpc();

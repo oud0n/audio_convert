@@ -77,6 +77,15 @@ export interface AudioFile {
   originalDeleted?: boolean;
   verificationResult?: QualityVerificationResult;
   isVerifying?: boolean;
+  /** A track of an album image: its range in `path` (seconds; no end = to the end). */
+  trackStart?: number;
+  trackEnd?: number;
+  /** Tracks of one image share this id; the image goes to the trash only after all of them. */
+  imageGroup?: string;
+  /** The .cue file the track came from (trashed together with the image). */
+  cuePath?: string;
+  /** The track converted and passed the checks needed before its image may be trashed. */
+  trashReady?: boolean;
 }
 
 export interface ConverterSettings {
@@ -111,6 +120,7 @@ export interface ConverterSettings {
   onExisting?: 'rename' | 'overwrite' | 'skip'; // when the output file already exists
   keepFolderLevels?: number; // source folders recreated under the output folder (0 = none)
   keepFolderFrom?: 'last' | 'first'; // count them from the end or the start of the source path
+  splitImages?: boolean; // split CUE sheets (and embedded sheets / chapters) into tracks
   bitrateMode?: 'cbr' | 'vbr'; // MP3 / AAC / Vorbis: fixed bitrate or quality-based VBR
   vbrQuality?: number; // LAME V scale, 0 (best) to 9; AAC and Vorbis get the equivalent
 }

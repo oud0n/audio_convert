@@ -143,6 +143,7 @@ fn src(bits: u32, rate: u32, ch: u32, lossless: bool, float: bool) -> SourceInfo
         cover_stream: Some(1),
         custom_layout: false,
         codec: Some(if lossless { "flac".into() } else { "mp3".into() }),
+        range: None,
     }
 }
 
@@ -400,6 +401,8 @@ fn request(input: &Path, out_dir: &Path, format: &str, file_name: &str) -> Conve
         job_id: None,
         settings: st,
         tags: None,
+        start_seconds: None,
+        end_seconds: None,
     }
 }
 
@@ -479,6 +482,64 @@ fn output_keeps_source_folders_and_pattern_subfolders() {
     let (path, _) = convert_blocking(&ctx(), &req).unwrap();
     let album = simplify_verbatim_path(fs::canonicalize(&album).unwrap());
     assert_eq!(path, album.join("Disc 1").join("01 Song.flac"));
+}
+
+#[test]
+fn cue_tracks_are_cut_sample_exact_and_verified() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    // 3 s at 44.1 kHz; the CUE (naming the WAV it was ripped to) splits at 1 s and 2.2 s.
+    let image = d.0.join("image.flac");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=3", "-ac", "2", "-c:a", "flac", "-metadata", "title=Whole image", "-metadata", "cuesheet=x", image.to_str().unwrap()]);
+    let cue = d.0.join("image.cue");
+    fs::write(&cue, "PERFORMER \"Band\"\nTITLE \"Album\"\nFILE \"image.wav\" WAVE\n  TRACK 01 AUDIO\n    TITLE \"One\"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE \"Two\"\n    INDEX 00 00:00:70\n    INDEX 01 00:01:00\n  TRACK 03 AUDIO\n    TITLE \"Three\"\n    INDEX 01 00:02:15\n").unwrap();
+    let tracks = crate::audio::cue::read_image_tracks(&cue);
+    assert!(tracks.success, "{:?}", tracks.error);
+    let t = &tracks.tracks[1];
+    let mut req = request(Path::new(&t.audio_path), &d.0.join("out"), "FLAC", "02 Two");
+    req.start_seconds = Some(t.start);
+    req.end_seconds = t.end;
+    req.tags = Some(InputTags { title: Some("Two".into()), track: Some("2/3".into()), ..Default::default() });
+    let (path, _) = convert_blocking(&ctx(), &req).unwrap();
+    let ff = get_ffmpeg_executable();
+    let (_, bytes) = compute_pcm_fingerprint(path.to_str().unwrap()).unwrap();
+    assert_eq!(bytes, (2.2f64 * 44100.0 - 44100.0).round() as usize * 2 * 8, "1.2 s exactly (f64 stereo)");
+    let r = crate::audio::audit::verify_quality_range(&t.audio_path, &path.to_string_lossy(), true, Some((t.start, t.end)), &|| false);
+    assert_eq!(r.result.unwrap().status, "perfect");
+    let tags = read_source_tags(&ff, &path).unwrap();
+    assert!(tags.iter().any(|(k, v)| k == "title" && v == "Two"));
+    assert!(!tags.iter().any(|(k, _)| k == "cuesheet"), "the image's sheet is not copied: {tags:?}");
+
+    // The last track runs to the end; the same pattern name gets a new name, never
+    // overwriting the other track even with "overwrite".
+    let last = &tracks.tracks[2];
+    let mut req = request(Path::new(&last.audio_path), &d.0.join("out"), "FLAC", "02 Two");
+    req.settings.on_existing = Some("overwrite".into());
+    req.start_seconds = Some(last.start);
+    let (path3, name) = convert_blocking(&ctx(), &req).unwrap();
+    assert_eq!(name, "02 Two_2.flac");
+    assert!((probe_source(&ff, &path3).unwrap().duration - 0.8).abs() < 0.01);
+    assert!(path.exists());
+}
+
+#[test]
+fn chapters_split_an_audio_file() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let meta = d.0.join("meta.txt");
+    fs::write(&meta, ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=500\ntitle=A\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=500\nEND=1000\ntitle=B\n").unwrap();
+    let book = d.0.join("book.m4a");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=1", "-i", meta.to_str().unwrap(), "-map_metadata", "1", "-map_chapters", "1", "-c:a", "aac", book.to_str().unwrap()]);
+    let r = crate::audio::cue::read_image_tracks(&book);
+    assert_eq!(r.tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+    assert_eq!(r.tracks[1].start, 0.5);
+    let plain = d.0.join("plain.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=0.2", plain.to_str().unwrap()]);
+    assert!(crate::audio::cue::read_image_tracks(&plain).tracks.is_empty());
 }
 
 #[test]

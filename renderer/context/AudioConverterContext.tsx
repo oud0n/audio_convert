@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
 import { analyzeAudioBuffer } from '../utils/audioEncoder';
-import { AppBridge, isPathOnlyFile, type PathOnlyFile } from '../services/bridge';
-import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS } from '../utils/fileNamePattern';
+import { AppBridge, isPathOnlyFile, type PathOnlyFile, type ImageTrack, type MetadataResult } from '../services/bridge';
+import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS, IMAGE_CAPABLE_EXTENSIONS } from '../utils/fileNamePattern';
 
 interface AudioConverterContextType {
   files: AudioFile[];
@@ -81,6 +81,78 @@ function previewSourcePath(f: AudioFile): string {
   return f.originalDeleted && f.outputPath ? f.outputPath : f.path || '';
 }
 
+/** The part of the preview file that belongs to this row (a track of an album image). */
+function previewRange(f: AudioFile): { start?: number; end?: number } | undefined {
+  if (f.trackStart === undefined || (f.originalDeleted && f.outputPath)) return undefined;
+  return { start: f.trackStart, end: f.trackEnd };
+}
+
+function fileExt(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+/** Queue rows for the tracks of an album image (CUE sheet, embedded sheet or chapters). */
+function imageTrackRecords(
+  tracks: ImageTrack[],
+  metaByPath: Map<string, MetadataResult>,
+  outputFormat: string,
+  fallbackBitrate: string,
+  cuePath?: string,
+): AudioFile[] {
+  const group = 'img_' + Math.random().toString(36).substring(2, 11);
+  return tracks.flatMap((t) => {
+    const meta = metaByPath.get(t.audioPath);
+    const format = meta?.success ? meta.format : undefined;
+    if (!format) return [];
+    const imageTags = meta?.tags ? tagsFromMetadata(meta.tags) : emptyTags();
+    const fileName = baseName(t.audioPath);
+    const ext = fileExt(fileName);
+    const pad = String(t.number).padStart(2, '0');
+    const total = t.totalTracks || '';
+    // The image's album tags, then the sheet's; title and numbering are the track's.
+    const tags = {
+      ...imageTags,
+      ...Object.fromEntries(Object.entries({
+        artist: t.artist, album: t.album, albumArtist: t.albumArtist, year: t.year, genre: t.genre, comment: t.comment, disc: t.disc,
+      }).filter(([, v]) => v)),
+      title: t.title,
+      track: total ? `${t.number}/${total}` : String(t.number),
+      totalTracks: total,
+    };
+    const end = t.end ?? format.duration;
+    return [{
+      id: Math.random().toString(36).substring(2, 11),
+      name: `${pad} ${t.title || fileName.replace(/\.[^.]+$/, '')}.${ext}`,
+      path: t.audioPath,
+      size: 0,
+      duration: Math.round(Math.max(0, end - t.start) * 10) / 10,
+      originalFormat: ext,
+      outputFormat,
+      bitrate: format.bitrate ? `${Math.round(format.bitrate / 1000)}k` : `${fallbackBitrate}k`,
+      sampleRate: format.sampleRate,
+      sourceSampleRate: format.sampleRate,
+      channels: format.numberOfChannels || 2,
+      status: 'queued' as const,
+      progress: 0,
+      normalizationApplied: false,
+      originalAudioBuffer: null,
+      tags,
+      // Every tag of the track is sent (the converter drops the image's own title / numbering).
+      sourceTags: emptyTags(),
+      sourceLossless: typeof format.lossless === 'boolean' ? format.lossless : undefined,
+      trackStart: t.start,
+      trackEnd: t.end ?? undefined,
+      imageGroup: group,
+      cuePath,
+    }];
+  });
+}
+
 const AudioConverterContext = createContext<AudioConverterContextType | undefined>(undefined);
 
 const defaultSettings: ConverterSettings = {
@@ -111,6 +183,7 @@ const defaultSettings: ConverterSettings = {
   flacCompressionLevel: 5,
   flacUncompressed: false,
   onExisting: 'rename',
+  splitImages: true,
   keepFolderLevels: 0,
   keepFolderFrom: 'last',
   bitrateMode: 'vbr',
@@ -155,6 +228,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const batchRef = useRef({ success: 0, failed: 0, warnings: 0 });
   /** Files of the running batch (files added while it runs are not part of it). */
   const batchFileIdsRef = useRef<Set<string>>(new Set());
+  /** Album images in the running batch: their tracks, and those ready for the trash. */
+  const imageGroupsRef = useRef<Map<string, { path: string; cuePath?: string; ids: Set<string>; ready: Set<string> }>>(new Map());
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   useEffect(() => {
@@ -270,6 +345,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   // selected. A source moved to the trash is read from its output instead.
   const selectedRecord = files.find(f => f.id === selectedFileId) || null;
   const selectedPath = selectedRecord ? previewSourcePath(selectedRecord) : '';
+  const selectedRange = selectedRecord ? previewRange(selectedRecord) : undefined;
   const selectedHasBuffer = !!selectedRecord?.originalAudioBuffer;
   useEffect(() => {
     const keepId = selectedFileId;
@@ -288,7 +364,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         ? { ...t, files: t.files.map(f => f.id === keepId ? { ...f, previewError: undefined } : f) }
         : t));
     }
-    AppBridge.decodeAudioToWav(selectedPath, requestId)
+    AppBridge.decodeAudioToWav(selectedPath, requestId, selectedRange)
       .then((data) => (stale ? null : decodePreviewWav(data)))
       .then((buffer) => {
         if (stale || !buffer) return;
@@ -312,7 +388,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       // Stop the backend decode too (no-op if it already finished).
       AppBridge.cancelPreview(requestId).catch(() => {});
     };
-  }, [selectedFileId, selectedPath, selectedHasBuffer]);
+  }, [selectedFileId, selectedPath, selectedHasBuffer, selectedRange?.start, selectedRange?.end]);
 
   // Helper to add logs to specific tab
   const addLogToTab = (tabId: string, message: string, type: 'info' | 'success' | 'error' = 'info') => {
@@ -503,7 +579,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     }
   };
 
-  const processAndDecodeFile = (f: File, targetTabId: string): Promise<{ success: boolean; fileRecord?: AudioFile; error?: string }> => {
+  const processAndDecodeFile = (f: File, targetTabId: string): Promise<{ success: boolean; fileRecord?: AudioFile; fileRecords?: AudioFile[]; error?: string }> => {
     return new Promise((resolve) => {
       const id = Math.random().toString(36).substring(2, 11);
       const ext = f.name.lastIndexOf('.') > 0 ? f.name.substring(f.name.lastIndexOf('.') + 1).toLowerCase() : '';
@@ -549,7 +625,25 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               sourceTags: { ...tags },
               sourceLossless: typeof format.lossless === 'boolean' ? format.lossless : undefined,
             };
-            resolve({ success: true, fileRecord });
+            // An audio file with an embedded CUE sheet or chapters becomes its tracks.
+            const split = (tabsRef.current.find(t => t.id === targetTabId)?.settings.splitImages ?? true) && IMAGE_CAPABLE_EXTENSIONS.includes(ext);
+            if (!split) {
+              resolve({ success: true, fileRecord });
+              return;
+            }
+            AppBridge.readImageTracks(knownPath)
+              .then((image) => {
+                const records = image.tracks.length >= 2
+                  ? imageTrackRecords(image.tracks, new Map([[image.tracks[0].audioPath, meta]]), settings.outputFormat, settings.bitrate)
+                  : [];
+                if (records.length >= 2) {
+                  addLogToTab(targetTabId, lang === 'ja' ? `"${f.name}" を ${records.length} トラックに分割しました（埋め込み CUE / チャプター）。` : `Split "${f.name}" into ${records.length} tracks (embedded CUE / chapters).`, 'info');
+                  resolve({ success: true, fileRecords: records });
+                } else {
+                  resolve({ success: true, fileRecord });
+                }
+              })
+              .catch(() => resolve({ success: true, fileRecord }));
           })
           .catch((err) => {
             addLogToTab(targetTabId, `[DEBUG] "${f.name}" - メタデータ読み込み例外: ${err?.message || err}`, 'error');
@@ -758,7 +852,55 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     if (typeof window === 'undefined') return;
     const targetTabId = activeTabId;
     const tabName = tabs.find(t => t.id === targetTabId)?.name || 'current';
-    const arr = Array.from(fileList);
+    const tabSettingsNow = tabs.find(t => t.id === targetTabId)?.settings || settings;
+    const all = Array.from(fileList);
+
+    // CUE sheets become one row per track; the audio files they name are not added
+    // again on their own (xrecode groups a CUE with its image).
+    const cueRecords: AudioFile[] = [];
+    const cueSkipped: Array<{ name: string; reason: string }> = [];
+    const covered = new Set<string>();
+    const cueFiles = all.filter(f => fileExt(f.name) === 'cue');
+    for (const cue of cueFiles) {
+      const cuePath = AppBridge.isAvailable() ? AppBridge.getPathForFile(cue) : '';
+      if (!cuePath) {
+        cueSkipped.push({ name: cue.name, reason: lang === 'ja' ? 'CUE シートはアプリ版でのみ読み込めます。' : 'CUE sheets need the desktop app.' });
+        continue;
+      }
+      if (!(tabSettingsNow.splitImages ?? true)) {
+        cueSkipped.push({ name: cue.name, reason: lang === 'ja' ? 'CUE で分割する設定がオフです。' : 'Splitting by CUE is turned off.' });
+        continue;
+      }
+      try {
+        const image = await AppBridge.readImageTracks(cuePath);
+        if (!image.success || image.tracks.length === 0) {
+          cueSkipped.push({ name: cue.name, reason: image.error || (lang === 'ja' ? 'トラックがありません。' : 'No tracks.') });
+          continue;
+        }
+        const metaByPath = new Map<string, MetadataResult>();
+        for (const audioPath of Array.from(new Set(image.tracks.map(t => t.audioPath)))) {
+          metaByPath.set(audioPath, await AppBridge.readAudioMetadata(audioPath).catch(() => ({ success: false } as MetadataResult)));
+        }
+        const records = imageTrackRecords(image.tracks, metaByPath, tabSettingsNow.outputFormat, tabSettingsNow.bitrate, cuePath);
+        if (records.length === 0) {
+          cueSkipped.push({ name: cue.name, reason: lang === 'ja' ? '参照先の音声ファイルを読み込めません。' : 'The audio file it names cannot be read.' });
+          continue;
+        }
+        image.tracks.forEach(t => covered.add(t.audioPath.toLowerCase()));
+        cueRecords.push(...records);
+        if (image.missing.length) {
+          addLogToTab(targetTabId, lang === 'ja' ? `"${cue.name}": 見つからない音声ファイル: ${image.missing.join(', ')}` : `"${cue.name}": audio files not found: ${image.missing.join(', ')}`, 'error');
+        }
+        addLogToTab(targetTabId, lang === 'ja' ? `"${cue.name}" から ${records.length} トラックを追加します。` : `Adding ${records.length} tracks from "${cue.name}".`, 'info');
+      } catch (err: any) {
+        cueSkipped.push({ name: cue.name, reason: String(err?.message || err) });
+      }
+    }
+    const isCovered = (f: File) => {
+      const p = AppBridge.isAvailable() ? AppBridge.getPathForFile(f) : '';
+      return !!p && covered.has(p.toLowerCase());
+    };
+    const arr = all.filter(f => fileExt(f.name) !== 'cue' && !isCovered(f));
 
     const analyzingMsg = lang === 'ja' ? `${arr.length}個のファイルを解析中...` : `Analyzing ${arr.length} files...`;
     const startedMsg = lang === 'ja' ? `${arr.length}個のファイルの読み込みとデコードを開始しました。` : `Started reading and decoding ${arr.length} files.`;
@@ -767,7 +909,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
 
     // Decode a few files at a time: a dropped folder can hold thousands, and each decode
     // runs FFmpeg and holds the decoded audio in memory.
-    const results: Array<{ success: boolean; fileRecord?: AudioFile; error?: string }> = new Array(arr.length);
+    const results: Array<{ success: boolean; fileRecord?: AudioFile; fileRecords?: AudioFile[]; error?: string }> = new Array(arr.length);
     let next = 0;
     const worker = async () => {
       while (next < arr.length) {
@@ -777,12 +919,14 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     };
     await Promise.all(Array.from({ length: Math.min(4, arr.length) }, worker));
 
-    const succeededFiles: AudioFile[] = [];
-    const skippedFiles: Array<{ name: string; reason: string }> = [];
+    const succeededFiles: AudioFile[] = [...cueRecords];
+    const skippedFiles: Array<{ name: string; reason: string }> = [...cueSkipped];
 
     results.forEach((res, i) => {
       const originalFile = arr[i];
-      if (res.success && res.fileRecord) {
+      if (res.success && res.fileRecords) {
+        succeededFiles.push(...res.fileRecords);
+      } else if (res.success && res.fileRecord) {
         succeededFiles.push(res.fileRecord);
       } else {
         skippedFiles.push({
@@ -834,6 +978,15 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     activeConversionTabIdRef.current = targetTabId;
     conversionQueueRef.current = queued.map((f) => f.id);
     batchFileIdsRef.current = new Set(queued.map((f) => f.id));
+    const groups = new Map<string, { path: string; cuePath?: string; ids: Set<string>; ready: Set<string> }>();
+    for (const f of currentTab.files) {
+      if (!f.imageGroup || !f.path) continue;
+      const g = groups.get(f.imageGroup) ?? { path: f.path, cuePath: f.cuePath, ids: new Set<string>(), ready: new Set<string>() };
+      g.ids.add(f.id);
+      if (f.status === 'completed' && f.trashReady && !f.originalDeleted) g.ready.add(f.id);
+      groups.set(f.imageGroup, g);
+    }
+    imageGroupsRef.current = groups;
     // Protect every queued source from "overwrite" before the first file starts.
     await AppBridge.setQueuedSources(queued.map((f) => f.path || "").filter(Boolean)).catch(() => {});
     
@@ -849,49 +1002,80 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     }
 
     if (conversionQueueRef.current.length === 0) {
-      setIsConverting(false);
-      activeConversionIdRef.current = null;
-      activeConversionTabIdRef.current = null;
-      
-      const { success, failed, warnings } = batchRef.current;
-      const message = lang === 'ja' ? `バッチ完了: 成功 ${success}件、失敗 ${failed}件、要確認 ${warnings}件` : `Batch finished: ${success} succeeded, ${failed} failed, ${warnings} need review`;
-      addLogToTab(targetTabId, message, failed || warnings ? 'error' : 'success');
-      showToast(failed ? 'error' : warnings ? 'info' : 'success', message);
-      
-      const tabSettings = tabsRef.current.find(t => t.id === targetTabId)?.settings || defaultSettings;
-      if (tabSettings.autoNotification) {
-        playNotificationSound(tabSettings.notificationSound);
-      }
-
-      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-        new Notification('Audio Convert', {
-          body: message,
-        });
-      }
-
-      // Like xrecode: when every file of the batch converted cleanly, the batch leaves
-      // the queue. After a failure (or a quality warning) the queue stays as it is, and
-      // the failed files' sources were never moved to the trash.
-      const batchIds = batchFileIdsRef.current;
-      if (!failed && !warnings) {
-        setTabs(prev => prev.map(t => t.id === targetTabId ? {
-          ...t,
-          files: t.files.filter((f) => !batchIds.has(f.id)),
-          selectedFileId: t.selectedFileId && batchIds.has(t.selectedFileId) ? null : t.selectedFileId,
-        } : t));
-      } else if (tabSettings.autoRemoveCompleted) {
-        setTabs(prev => prev.map(t => t.id === targetTabId ? {
-          ...t,
-          files: t.files.filter((f) => f.status !== 'completed'),
-          selectedFileId: t.files.some(f => f.id === t.selectedFileId && f.status === 'completed') ? null : t.selectedFileId,
-        } : t));
-      }
+      finishBatch(targetTabId);
       return;
     }
 
     const currentId = conversionQueueRef.current.shift()!;
     activeConversionIdRef.current = currentId;
     runConversionWorkflow(targetTabId, currentId);
+  };
+
+  /** Moves album images whose tracks all converted cleanly to the trash (with their CUE). */
+  const trashFinishedImages = async (tabId: string) => {
+    const tabSettings = tabsRef.current.find(t => t.id === tabId)?.settings || defaultSettings;
+    if (!tabSettings.deleteOriginalAfterConvert || !AppBridge.isAvailable()) return;
+    const groups = imageGroupsRef.current;
+    imageGroupsRef.current = new Map();
+    for (const [group, g] of Array.from(groups.entries())) {
+      if (g.ready.size !== g.ids.size) continue;
+      const result = await AppBridge.trashFile(g.path).catch((e: any) => ({ success: false, error: String(e?.message || e) }));
+      if (!result?.success) {
+        batchRef.current.warnings++;
+        addLogToTab(tabId, lang === 'ja' ? `元ファイルのゴミ箱への移動に失敗しました: "${g.path}": ${result?.error}` : `Failed to move the original to the trash: "${g.path}": ${result?.error}`, 'error');
+        continue;
+      }
+      addLogToTab(tabId, lang === 'ja' ? `全トラックの変換が終わったため元ファイルをゴミ箱に移動しました: "${g.path}"` : `All tracks done; moved the original to the trash: "${g.path}"`, 'success');
+      if (g.cuePath) {
+        const cue = await AppBridge.trashFile(g.cuePath).catch(() => null);
+        if (!cue?.success) addLogToTab(tabId, lang === 'ja' ? `CUE シートをゴミ箱に移動できませんでした: "${g.cuePath}"` : `Could not move the CUE sheet to the trash: "${g.cuePath}"`, 'error');
+      }
+      setTabs(prev => prev.map(t => t.id === tabId ? {
+        ...t,
+        files: t.files.map(f => f.imageGroup === group ? { ...f, originalDeleted: true } : f),
+      } : t));
+    }
+  };
+
+  const finishBatch = async (targetTabId: string) => {
+    await trashFinishedImages(targetTabId);
+    setIsConverting(false);
+    activeConversionIdRef.current = null;
+    activeConversionTabIdRef.current = null;
+
+    const { success, failed, warnings } = batchRef.current;
+    const message = lang === 'ja' ? `バッチ完了: 成功 ${success}件、失敗 ${failed}件、要確認 ${warnings}件` : `Batch finished: ${success} succeeded, ${failed} failed, ${warnings} need review`;
+    addLogToTab(targetTabId, message, failed || warnings ? 'error' : 'success');
+    showToast(failed ? 'error' : warnings ? 'info' : 'success', message);
+    
+    const tabSettings = tabsRef.current.find(t => t.id === targetTabId)?.settings || defaultSettings;
+    if (tabSettings.autoNotification) {
+      playNotificationSound(tabSettings.notificationSound);
+    }
+
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification('Audio Convert', {
+        body: message,
+      });
+    }
+
+    // Like xrecode: when every file of the batch converted cleanly, the batch leaves
+    // the queue. After a failure (or a quality warning) the queue stays as it is, and
+    // the failed files' sources were never moved to the trash.
+    const batchIds = batchFileIdsRef.current;
+    if (!failed && !warnings) {
+      setTabs(prev => prev.map(t => t.id === targetTabId ? {
+        ...t,
+        files: t.files.filter((f) => !batchIds.has(f.id)),
+        selectedFileId: t.selectedFileId && batchIds.has(t.selectedFileId) ? null : t.selectedFileId,
+      } : t));
+    } else if (tabSettings.autoRemoveCompleted) {
+      setTabs(prev => prev.map(t => t.id === targetTabId ? {
+        ...t,
+        files: t.files.filter((f) => f.status !== 'completed'),
+        selectedFileId: t.files.some(f => f.id === t.selectedFileId && f.status === 'completed') ? null : t.selectedFileId,
+      } : t));
+    }
   };
 
   const runConversionWorkflow = async (tabId: string, id: string) => {
@@ -952,6 +1136,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           outputFormat: fileRecord.outputFormat,
           // Only edited tags; the converter copies everything else from the source.
           tags: editedTags(fileRecord.tags, fileRecord.sourceTags),
+          startSeconds: fileRecord.trackStart ?? null,
+          endSeconds: fileRecord.trackEnd ?? null,
         });
 
         if (saveResult?.success && saveResult.skipped && saveResult.path) {
@@ -1000,6 +1186,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               originalPath: fileRecord.path,
               convertedPath: savedPath,
               isLosslessPair,
+              startSeconds: fileRecord.trackStart,
+              endSeconds: fileRecord.trackEnd,
             });
 
             checkActive();
@@ -1022,9 +1210,13 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       if (!savedOutputPath) throw new Error('No output file was saved');
       checkActive();
 
-      // 3. Trash original file if deleteOriginalAfterConvert is active
+      // 3. Trash original file if deleteOriginalAfterConvert is active. A track of an album
+      // image only marks itself ready; the image goes once all of its tracks are done.
       let originalDeleted = false;
-      if (tabSettings.deleteOriginalAfterConvert && savedOutputPath !== fileRecord.path && (!tabSettings.autoVerifyQuality || verificationResult?.status === 'perfect' || verificationResult?.status === 'passed') && fileRecord.path && AppBridge.isAvailable()) {
+      const checksPassed = !tabSettings.autoVerifyQuality || verificationResult?.status === 'perfect' || verificationResult?.status === 'passed';
+      if (fileRecord.imageGroup) {
+        // handled by finishBatch
+      } else if (tabSettings.deleteOriginalAfterConvert && savedOutputPath !== fileRecord.path && (!tabSettings.autoVerifyQuality || verificationResult?.status === 'perfect' || verificationResult?.status === 'passed') && fileRecord.path && AppBridge.isAvailable()) {
         addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 元ファイルをゴミ箱に移動中...` : `[${fileRecord.name}] Moving original file to trash...`, 'info');
         const trashResult = await AppBridge.trashFile(fileRecord.path, job.id);
         if (trashResult && trashResult.success) {
@@ -1066,12 +1258,14 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               gainMultiplier: gainMult,
               originalDeleted: originalDeleted,
               verificationResult: verificationResult,
+              trashReady: !!fileRecord.imageGroup && checksPassed,
             } : f)
           };
         }
         return t;
       }));
 
+      if (fileRecord.imageGroup && checksPassed) imageGroupsRef.current.get(fileRecord.imageGroup)?.ready.add(id);
       addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換に成功しました。` : `[${fileRecord.name}] Conversion finished successfully.`, 'success');
 
     } catch (err: any) {
@@ -1137,6 +1331,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         originalPath: file.path,
         convertedPath: outputPath,
         isLosslessPair,
+        startSeconds: file.trackStart,
+        endSeconds: file.trackEnd,
       });
 
       if (vRes && vRes.success && vRes.result) {

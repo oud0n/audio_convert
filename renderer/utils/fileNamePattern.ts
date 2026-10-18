@@ -197,5 +197,8 @@ export function isLosslessSource(sourceLossless: boolean | undefined, fileName: 
 export const SUPPORTED_INPUT_EXTENSIONS = [
   'wav', 'w64', 'rf64', 'bwf', 'aif', 'aiff', 'aifc', 'caf', 'flac', 'fla', 'm4a', 'm4b', 'mp4', 'alac', 'aac',
   'mp3', 'mp2', 'mpa', 'ogg', 'oga', 'opus', 'spx', 'wma', 'asf', 'wv', 'ape', 'tta', 'tak', 'mpc', 'ac3', 'eac3',
-  'dts', 'mka', 'mkv', 'webm', 'mov', 'dsf', 'dff', 'amr', 'au', 'snd', 'voc',
+  'dts', 'mka', 'mkv', 'webm', 'mov', 'dsf', 'dff', 'amr', 'au', 'snd', 'voc', 'cue',
 ];
+
+/** Formats that can hold an embedded CUE sheet or chapters (checked when added). */
+export const IMAGE_CAPABLE_EXTENSIONS = ['flac', 'fla', 'wv', 'ape', 'tta', 'tak', 'm4a', 'm4b', 'mp4', 'mka', 'mkv', 'ogg', 'opus'];

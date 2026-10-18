@@ -88,14 +88,16 @@ pub fn decode_to_temp_wav(
     sample_rate: Option<u32>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    decode_to_temp_wav_with(file_path, sample_rate, 2, None, cancelled)
+    decode_to_temp_wav_with(file_path, sample_rate, 2, None, None, cancelled)
 }
 
-/// Like `decode_to_temp_wav`, with a channel count and an optional length limit (seconds).
+/// Like `decode_to_temp_wav`, with a channel count, an optional start (seconds, for a
+/// track of an album image) and an optional length limit (seconds).
 pub fn decode_to_temp_wav_with(
     file_path: &str,
     sample_rate: Option<u32>,
     channels: u32,
+    start_seconds: Option<f64>,
     max_seconds: Option<f64>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
@@ -111,7 +113,11 @@ pub fn decode_to_temp_wav_with(
 
     let ffmpeg = get_ffmpeg_executable();
     let mut cmd = crate::audio::convert::hidden_command(&ffmpeg);
-    cmd.args(["-y", "-i", file_path, "-map", "0:a:0", "-acodec", "pcm_s16le", "-ac", &channels.to_string()]);
+    cmd.arg("-y");
+    if let Some(s) = start_seconds.filter(|s| *s > 0.0) {
+        cmd.args(["-ss", &format!("{s:.6}")]);
+    }
+    cmd.args(["-i", file_path, "-map", "0:a:0", "-acodec", "pcm_s16le", "-ac", &channels.to_string()]);
     if let Some(sr) = sample_rate {
         cmd.args(["-ar", &sr.to_string()]);
     }
@@ -147,22 +153,35 @@ pub fn compute_pcm_fingerprint_cancellable(
     file_path: &str,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
+    compute_pcm_fingerprint_range(file_path, None, cancelled)
+}
+
+/// Range of a track inside an album image, in seconds (None = the whole file).
+pub type Range = Option<(f64, Option<f64>)>;
+
+fn range_filter(file_path: &str, range: Range) -> Option<String> {
+    let range = range?;
+    let rate = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(file_path)).ok().and_then(|i| i.sample_rate);
+    Some(crate::audio::convert::trim_filter(range, rate))
+}
+
+/// SHA-256 of the decoded samples (only `range` of them for an image track).
+pub fn compute_pcm_fingerprint_range(
+    file_path: &str,
+    range: Range,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
     let ffmpeg = get_ffmpeg_executable();
-    let mut child = crate::audio::convert::hidden_command(&ffmpeg)
-        .args([
-            "-v",
-            "error",
-            "-i",
-            file_path,
-            "-map",
-            "0:a:0",
-            "-c:a",
-            "pcm_f64le",
-            "-f",
-            "f64le",
-            "-",
-        ])
+    let mut cmd = crate::audio::convert::hidden_command(&ffmpeg);
+    cmd.args(["-v", "error", "-nostdin", "-i", file_path, "-map", "0:a:0"]);
+    if let Some(trim) = range_filter(file_path, range) {
+        cmd.args(["-af", &trim]);
+    }
+    let mut child = cmd
+        .args(["-c:a", "pcm_f64le", "-f", "f64le", "-"])
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .spawn()?;
 
     let mut stdout = child.stdout.take().ok_or("Failed to open stdout")?;
@@ -251,14 +270,16 @@ fn spawn_f32_decoder(
     path: &str,
     channels: Option<u32>,
     rate: Option<u32>,
+    trim: Option<String>,
 ) -> Result<std::process::Child, Box<dyn std::error::Error + Send + Sync>> {
     let mut cmd = crate::audio::convert::hidden_command(&get_ffmpeg_executable());
     cmd.args(["-v", "error", "-nostdin", "-i", path, "-map", "0:a:0"]);
     if let Some(ch) = channels {
         cmd.args(["-ac", &ch.to_string()]);
     }
-    if let Some(sr) = rate {
-        cmd.args(["-af", &crate::audio::convert::resample_filter(sr)]);
+    let filters: Vec<String> = trim.into_iter().chain(rate.map(crate::audio::convert::resample_filter)).collect();
+    if !filters.is_empty() {
+        cmd.args(["-af", &filters.join(",")]);
     }
     cmd.args(["-c:a", "pcm_f32le", "-f", "f32le", "-"]);
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
@@ -283,6 +304,7 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
 fn compare_files(
     original: &str,
     converted: &str,
+    range: Range,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<DiffMetrics, Box<dyn std::error::Error + Send + Sync>> {
     let out = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(converted)).map_err(|e| e.to_string())?;
@@ -290,8 +312,9 @@ fn compare_files(
     let channels = out.channels.unwrap_or(2).max(1) as usize;
     let remix = out.channels.filter(|c| src.channels != Some(*c));
     let resample = out.sample_rate.filter(|r| src.sample_rate != Some(*r));
-    let mut a = spawn_f32_decoder(original, remix, resample)?;
-    let mut b = match spawn_f32_decoder(converted, None, None) {
+    let trim = range.map(|r| crate::audio::convert::trim_filter(r, src.sample_rate));
+    let mut a = spawn_f32_decoder(original, remix, resample, trim)?;
+    let mut b = match spawn_f32_decoder(converted, None, None, None) {
         Ok(b) => b,
         Err(e) => {
             let _ = a.kill();
@@ -345,12 +368,15 @@ pub async fn verify_audio_quality(
     converted_path: String,
     is_lossless_pair: bool,
     job_id: Option<String>,
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
 ) -> VerifyQualityResponse {
     use tauri::Manager;
     let jobs = app.state::<crate::audio::convert::ActiveJobs>().inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let cancelled = crate::audio::convert::job_cancelled_fn(jobs, job_id);
-        verify_quality_blocking(&original_path, &converted_path, is_lossless_pair, &cancelled)
+        let range = start_seconds.filter(|s| s.is_finite() && *s >= 0.0).map(|s| (s, end_seconds.filter(|e| e.is_finite() && *e > s)));
+        verify_quality_range(&original_path, &converted_path, is_lossless_pair, range, &cancelled)
     })
     .await
     .unwrap_or_else(|e| VerifyQualityResponse { success: false, result: None, error: Some(e.to_string()) })
@@ -366,6 +392,18 @@ pub fn verify_quality_blocking(
     is_lossless_pair: bool,
     cancelled: &dyn Fn() -> bool,
 ) -> VerifyQualityResponse {
+    verify_quality_range(original_path, converted_path, is_lossless_pair, None, cancelled)
+}
+
+/// Like `verify_quality_blocking`; with `range`, the converted file is a track cut from
+/// that range of the original.
+pub fn verify_quality_range(
+    original_path: &str,
+    converted_path: &str,
+    is_lossless_pair: bool,
+    range: Range,
+    cancelled: &dyn Fn() -> bool,
+) -> VerifyQualityResponse {
     let (original_path, converted_path) = (original_path.to_string(), converted_path.to_string());
     let now = chrono::Local::now().format("%H:%M:%S").to_string();
 
@@ -378,7 +416,7 @@ pub fn verify_quality_blocking(
     }
 
     // 1. Bit-exact SHA-256 Fingerprint check
-    let orig_hash = compute_pcm_fingerprint_cancellable(&original_path, cancelled);
+    let orig_hash = compute_pcm_fingerprint_range(&original_path, range, cancelled);
     if cancelled() {
         return failure(CANCELLED.into());
     }
@@ -420,7 +458,7 @@ pub fn verify_quality_blocking(
     // Compared at the output's rate and channel count (a 96 kHz limit on a 192 kHz
     // source, or a downmix, would otherwise be compared sample by sample at different
     // shapes), in 32-bit float so 24-bit and multichannel differences show.
-    let analysis_result = compare_files(&original_path, &converted_path, cancelled);
+    let analysis_result = compare_files(&original_path, &converted_path, range, cancelled);
     if cancelled() {
         return failure(CANCELLED.into());
     }

@@ -26,6 +26,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             audio::metadata::read_audio_metadata,
+            audio::cue::read_image_tracks_command,
             audio::convert::convert_audio,
             audio::convert::move_output_into_place,
             audio::convert::start_conversion_job,

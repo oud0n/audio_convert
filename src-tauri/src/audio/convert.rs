@@ -100,6 +100,53 @@ pub struct ConvertRequest {
     pub job_id: Option<String>,
     pub settings: ConverterSettings,
     pub tags: Option<InputTags>,
+    /// A track of an album image (CUE sheet or chapter): its range in the input, in
+    /// seconds. None = the whole file.
+    #[serde(rename = "startSeconds")]
+    pub start_seconds: Option<f64>,
+    #[serde(rename = "endSeconds")]
+    pub end_seconds: Option<f64>,
+}
+
+/// Audio extensions a CUE sheet's FILE may point to after re-encoding.
+pub const IMAGE_AUDIO_EXTENSIONS: &[&str] = &["flac", "wav", "ape", "wv", "tta", "tak", "aiff", "aif", "w64", "m4a", "mp3", "ogg", "opus", "wma", "dsf", "dff"];
+
+impl ConvertRequest {
+    fn range(&self) -> Option<(f64, Option<f64>)> {
+        let start = self.start_seconds.filter(|s| s.is_finite() && *s >= 0.0);
+        let end = self.end_seconds.filter(|e| e.is_finite() && *e > start.unwrap_or(0.0));
+        (start.is_some() || end.is_some()).then(|| (start.unwrap_or(0.0), end))
+    }
+}
+
+/// FFmpeg filter cutting `range` (seconds) out of the input, sample-exact when the
+/// rate is known, with timestamps restarted at 0.
+pub fn trim_filter(range: (f64, Option<f64>), rate: Option<u32>) -> String {
+    let (start, end) = range;
+    let trim = match rate {
+        Some(r) => {
+            let at = |t: f64| (t * f64::from(r)).round() as u64;
+            match end {
+                Some(e) => format!("atrim=start_sample={}:end_sample={}", at(start), at(e)),
+                None => format!("atrim=start_sample={}", at(start)),
+            }
+        }
+        None => match end {
+            Some(e) => format!("atrim=start={start:.6}:end={e:.6}"),
+            None => format!("atrim=start={start:.6}"),
+        },
+    };
+    format!("{trim},asetpts=N/SR/TB")
+}
+
+/// Identity of a conversion source: the file, plus the track range for an image track
+/// (tracks of one image are different sources for "overwrite" and "skip").
+fn source_id(input: &Path, range: Option<(f64, Option<f64>)>) -> Option<String> {
+    let key = output_key(input)?;
+    Some(match range {
+        Some((s, e)) => format!("{key}#{s:.6}-{}", e.map_or("end".to_string(), |e| format!("{e:.6}"))),
+        None => key,
+    })
 }
 
 /// Outputs this app wrote in this session, with the source each came from. "Overwrite"
@@ -131,7 +178,7 @@ fn output_key(path: &Path) -> Option<String> {
 
 /// True when `path` is another source's output from this session, or another source
 /// that is still queued: "overwrite" and "skip" must leave such a file alone.
-fn written_from_other_source(path: &Path, input: &Path) -> bool {
+fn written_from_other_source(path: &Path, input: &Path, range: Option<(f64, Option<f64>)>) -> bool {
     let Some(key) = output_key(path) else { return false };
     let input_key = output_key(input);
     if Some(&key) != input_key.as_ref()
@@ -139,8 +186,9 @@ fn written_from_other_source(path: &Path, input: &Path) -> bool {
     {
         return true;
     }
+    let source = source_id(input, range);
     let guard = SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref().and_then(|m| m.get(&key)).is_some_and(|src| Some(src) != input_key.as_ref())
+    guard.as_ref().and_then(|m| m.get(&key)).is_some_and(|src| Some(src) != source.as_ref())
 }
 
 /// Registers the sources of a batch that is starting (replaces the previous batch's).
@@ -159,8 +207,8 @@ fn set_queued_sources_blocking(paths: &[PathBuf]) {
     *QUEUED_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(set);
 }
 
-fn record_output(path: &Path, input: &Path) {
-    let (Some(key), Some(source)) = (output_key(path), output_key(input)) else { return };
+fn record_output(path: &Path, input: &Path, range: Option<(f64, Option<f64>)>) {
+    let (Some(key), Some(source)) = (output_key(path), source_id(input, range)) else { return };
     let mut guard = SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
     guard.get_or_insert_with(HashMap::new).insert(key, source);
 }
@@ -356,6 +404,8 @@ pub struct SourceInfo {
     /// The channel layout is not a named one (FFmpeg prints "2 channels (FL+FC)").
     pub custom_layout: bool,
     pub codec: Option<String>,
+    /// Set for a track of an album image: only this range (seconds) is converted.
+    pub range: Option<(f64, Option<f64>)>,
 }
 
 impl SourceInfo {
@@ -701,6 +751,9 @@ pub fn target_shape(format: OutFormat, settings: &ConverterSettings, source: &So
 /// rejects and which reorders 3.0 / quad sources.
 pub fn pre_gain_filters(format: OutFormat, settings: &ConverterSettings, source: &SourceInfo) -> Vec<String> {
     let mut filters = Vec::new();
+    if let Some(range) = source.range {
+        filters.push(trim_filter(range, source.sample_rate));
+    }
     if !same_as_source(settings) && settings.trim_silence.unwrap_or(false) {
         let db = settings.trim_silence_threshold_db.unwrap_or(-50.0);
         let trim = format!("silenceremove=start_periods=1:start_duration=0:start_threshold={db}dB:detection=peak:window=0.001");
@@ -802,6 +855,10 @@ pub fn build_encode_args(
     // them in different places (Ogg in the stream, MP3/FLAC/MP4 globally) and some
     // muxers write FFmpeg key names verbatim (APEv2), so a blind copy is unreliable.
     args.extend(["-map_metadata".into(), "-1".into()]);
+    if source.range.is_some() {
+        // The image's chapters describe the whole file, not this track.
+        args.extend(["-map_chapters".into(), "-1".into()]);
+    }
 
     if format.supports_cover() {
         if let Some(index) = source.cover_stream {
@@ -1553,13 +1610,22 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
     let planned = dir.join(format!("{stem}.{ext}"));
     // Only an existing file counts (not a folder or a dangling link), and never the
     // source itself: converting a file into its own folder and format is not "done".
-    if on_existing == OnExisting::Skip && planned.is_file() && !is_input(&planned, &input) && !written_from_other_source(&planned, &input) {
+    let range = request.range();
+    if on_existing == OnExisting::Skip && planned.is_file() && !is_input(&planned, &input) && !written_from_other_source(&planned, &input, range) {
         let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         return Ok(Converted { path: planned, name, skipped: true, replaces: None, gain_db: None });
     }
 
     let ffmpeg = get_ffmpeg_executable();
-    let source = probe_source(&ffmpeg, &input)?;
+    let mut source = probe_source(&ffmpeg, &input)?;
+    if let Some((start, end)) = range {
+        let stop = end.unwrap_or(source.duration).min(source.duration.max(start));
+        if source.duration > 0.0 && start >= source.duration {
+            return Err(format!("The track starts after the end of the audio file ({start:.2} s)"));
+        }
+        source.range = Some((start, end));
+        source.duration = (stop - start).max(0.0);
+    }
     ctx.check()?;
 
     let work = TempDir(std::env::temp_dir().join(format!("audio-convert-{}", uuid::Uuid::new_v4().simple())));
@@ -1597,7 +1663,12 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
         }
     }
 
-    let tags = merge_tags(&read_source_tags(&ffmpeg, &input).unwrap_or_default(), request.tags.as_ref());
+    let mut source_tags = read_source_tags(&ffmpeg, &input).unwrap_or_default();
+    if range.is_some() {
+        // The image's own sheet, title and numbering are not the track's.
+        source_tags.retain(|(k, _)| !matches!(k.as_str(), "cuesheet" | "title" | "track" | "tracktotal" | "totaltracks" | "lyrics"));
+    }
+    let tags = merge_tags(&source_tags, request.tags.as_ref());
     let plan = build_encode_args(format, &input, &temp_output, settings, &source, &tags, gain_db)?;
     ctx.emit("converting", 0.0);
     run_ffmpeg(ctx, &ffmpeg, &plan.args, source.duration, "converting")?;
@@ -1676,7 +1747,7 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
         copied.map_err(|e| format!("Cannot write to output folder: {e}"))?;
         // Another job may have written the same name while this one was encoding.
         let is_source = is_input(&planned, &input);
-        let other_output = written_from_other_source(&planned, &input);
+        let other_output = written_from_other_source(&planned, &input, range);
         if on_existing == OnExisting::Skip && planned.is_file() && !is_source && !other_output {
             let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
             return Ok(Converted { path: planned, name, skipped: true, replaces: None, gain_db: None });
@@ -1692,10 +1763,10 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
         } else {
             publish_unique(&staging, &dir, &stem, ext, ctx)?
         };
-        record_output(&destination, &input);
+        record_output(&destination, &input, range);
         // The output may later take the source's own name (after the source is trashed).
         if let Some(target) = &replaces {
-            record_output(target, &input);
+            record_output(target, &input, range);
         }
         let name = destination.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         Ok(Converted { path: destination, name, skipped: false, replaces, gain_db })
@@ -1824,14 +1895,25 @@ pub fn preview_plan(source_rate: Option<u32>, duration: f64) -> (Option<u32>, u3
 /// Decodes a file to 16-bit WAV for the waveform and player (see `preview_plan`). The
 /// bytes go to the page as binary, not a JSON array. `cancel_preview` stops it.
 #[tauri::command]
-pub async fn decode_audio_to_wav(file_path: String, request_id: Option<u64>) -> Result<tauri::ipc::Response, String> {
+pub async fn decode_audio_to_wav(
+    file_path: String,
+    request_id: Option<u64>,
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
+) -> Result<tauri::ipc::Response, String> {
     let id = request_id.unwrap_or_else(|| u64::from(uuid::Uuid::new_v4().as_fields().0) | (1 << 63));
     let flag = start_preview(id);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let cancelled = || flag.load(std::sync::atomic::Ordering::SeqCst);
         let probe = probe_source(&get_ffmpeg_executable(), Path::new(&file_path)).ok();
-        let (rate, channels, limit) = preview_plan(probe.as_ref().and_then(|p| p.sample_rate), probe.map_or(0.0, |p| p.duration));
-        let temp = crate::audio::audit::decode_to_temp_wav_with(&file_path, rate, channels, Some(limit), &cancelled).map_err(|e| {
+        // A track of an album image previews only its own range.
+        let start = start_seconds.filter(|s| s.is_finite() && *s > 0.0);
+        let full = probe.as_ref().map_or(0.0, |p| p.duration);
+        let end = end_seconds.filter(|e| e.is_finite() && *e > start.unwrap_or(0.0)).map_or(full, |e| if full > 0.0 { e.min(full) } else { e });
+        let length = (end - start.unwrap_or(0.0)).max(0.0);
+        let (rate, channels, limit) = preview_plan(probe.as_ref().and_then(|p| p.sample_rate), length);
+        let limit = if end_seconds.is_some() && length > 0.0 { limit.min(length) } else { limit };
+        let temp = crate::audio::audit::decode_to_temp_wav_with(&file_path, rate, channels, start, Some(limit), &cancelled).map_err(|e| {
             if cancelled() { crate::audio::audit::CANCELLED.to_string() } else { e.to_string() }
         })?;
         let data = fs::read(&temp).map_err(|e| e.to_string());
