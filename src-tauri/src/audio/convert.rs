@@ -1262,6 +1262,11 @@ pub fn build_encode_args(
     if let Some(g) = gain {
         filters.push(format!("volume={g:.4}dB"));
     }
+    // A lossy encoder needs a whole frame (AC-3: 1536 samples): a sound shorter than
+    // that gets silence after it up to 50 ms instead of an empty file.
+    if !format.is_lossless() && source.duration > 0.0 && source.duration < 0.05 {
+        filters.push("apad=whole_dur=0.05".into());
+    }
 
     let (rate, channels) = target_shape(format, settings, source);
     if let Some(sr) = rate {
@@ -2180,22 +2185,24 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
     }
     if action.is_none() && format == OutFormat::Flac && settings.flac_uncompressed.unwrap_or(false) {
         ctx.emit("converting", 99.0);
-        let pcm = work.0.join("output.s32");
-        let args: Vec<String> = vec![
-            "-i".into(),
-            temp_output.to_string_lossy().into_owned(),
-            "-map".into(),
-            "0:a:0".into(),
-            "-c:a".into(),
-            "pcm_s32le".into(),
-            "-f".into(),
-            "s32le".into(),
-            pcm.to_string_lossy().into_owned(),
-        ];
-        run_ffmpeg(ctx, &ffmpeg, &args, 0.0, "converting")?;
+        // The decoded samples go straight from FFmpeg into the rewrite (no PCM file).
+        let mut child = hidden_command(&ffmpeg)
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&temp_output)
+            .args(["-map", "0:a:0", "-c:a", "pcm_s32le", "-f", "s32le", "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to start FFmpeg: {e}"))?;
+        let pcm = child.stdout.take().ok_or("Failed to read FFmpeg's output")?;
+        let rewritten = flac_verbatim::rewrite_verbatim_from(&temp_output, pcm);
+        let status = child.wait().map_err(|e| e.to_string())?;
+        rewritten.map_err(|e| format!("Cannot write uncompressed FLAC: {e}"))?;
+        if !status.success() {
+            return Err("Cannot write uncompressed FLAC: decoding failed".into());
+        }
         ctx.check()?;
-        flac_verbatim::rewrite_verbatim(&temp_output, &pcm).map_err(|e| format!("Cannot write uncompressed FLAC: {e}"))?;
-        let _ = fs::remove_file(&pcm);
     }
 
     // A source with an intact header but no decodable audio gives an empty output.

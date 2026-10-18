@@ -1004,6 +1004,23 @@ fn join_keeps_every_channel_for_any_count_and_length() {
 }
 
 #[test]
+fn very_short_sources_convert_to_every_format() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let src = d.0.join("blip.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=0.005:sample_rate=44100", src.to_str().unwrap()]);
+    let mut failed = Vec::new();
+    for format in ["MP3", "M4A", "OGG", "OPUS", "AC3", "WMA", "FLAC", "ALAC", "WAV", "AIFF", "WAVPACK"] {
+        if let Err(e) = convert_blocking(&ctx(), &request(&src, &d.0.join("out"), format, format)) {
+            failed.push(format!("{format}: {e}"));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:?}");
+}
+
+#[test]
 fn hi_res_source_to_mp3_and_opus_succeeds() {
     if !ffmpeg_available() {
         return;

@@ -52,6 +52,25 @@ pub fn get_ffmpeg_executable() -> PathBuf {
             return sidecar;
         }
     }
+    // Development builds and tests: the FFmpeg prepared for bundling (the one users get),
+    // before the npm ffmpeg-static (an older FFmpeg that behaves differently).
+    #[cfg(debug_assertions)]
+    {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries");
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut found: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    name.starts_with(&format!("audio-convert-ffmpeg-{}", std::env::consts::ARCH)) && (exe.is_empty() || name.ends_with(exe)) && !name.ends_with(".txt")
+                })
+                .collect();
+            found.sort();
+            if let Some(p) = found.into_iter().next() {
+                return p;
+            }
+        }
+    }
     let name = format!("ffmpeg{exe}");
     for base in ["node_modules", "../node_modules"] {
         let local = Path::new(base).join("ffmpeg-static").join(&name);

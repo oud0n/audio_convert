@@ -206,7 +206,11 @@ fn write_frame(info: &StreamInfo, number: u64, samples: &[i32], n: usize) -> Vec
 /// Rewrites `flac` (a FLAC file) in place with uncompressed frames. `pcm` is the raw
 /// signed 32-bit little-endian interleaved audio of the same file (each sample's value
 /// in the top bits, as FFmpeg's decoder outputs it).
-pub fn rewrite_verbatim(flac: &Path, pcm: &Path) -> Result<(), String> {
+/// Rewrites `flac` with VERBATIM subframes holding the samples read from `pcm` (s32le,
+/// interleaved, as FFmpeg decodes the same file). The new file is written once, next to
+/// `flac`: the header first with a placeholder STREAMINFO, then the frames, then the
+/// STREAMINFO is patched in place, so the disk holds only the old and the new file.
+pub fn rewrite_verbatim_from(flac: &Path, pcm: impl Read) -> Result<(), String> {
     let (blocks, _) = read_blocks(&mut BufReader::new(File::open(flac).map_err(|e| e.to_string())?))?;
     let stream = blocks.first().filter(|b| b.kind == 0).ok_or("FLAC has no STREAMINFO")?;
     let info = parse_stream_info(&stream.data)?;
@@ -216,10 +220,26 @@ pub fn rewrite_verbatim(flac: &Path, pcm: &Path) -> Result<(), String> {
     let shift = 32 - info.bits;
     let ch = info.channels as usize;
 
-    let tmp = flac.with_extension("verbatim.tmp");
+    let out_path = flac.with_extension("verbatim.flac.tmp");
     let result = (|| -> Result<(), String> {
-        let mut reader = BufReader::new(File::open(pcm).map_err(|e| e.to_string())?);
-        let mut frames = BufWriter::new(File::create(&tmp).map_err(|e| e.to_string())?);
+        let mut reader = BufReader::new(pcm);
+        let kept: Vec<&Block> = blocks.iter().skip(1).filter(|b| b.kind != 3).collect();
+        let mut head = b"fLaC".to_vec();
+        let mut push_block = |kind: u8, data: &[u8], last: bool| {
+            let len = data.len() as u32;
+            head.push(kind | if last { 0x80 } else { 0 });
+            head.extend_from_slice(&len.to_be_bytes()[1..]);
+            head.extend_from_slice(data);
+        };
+        push_block(0, &stream.data, kept.is_empty());
+        for (i, b) in kept.iter().enumerate() {
+            push_block(b.kind, &b.data, i + 1 == kept.len());
+        }
+        // STREAMINFO data starts after "fLaC" and its 4-byte block header.
+        let si_at = 8u64;
+        let mut out = BufWriter::new(File::create(&out_path).map_err(|e| e.to_string())?);
+        out.write_all(&head).map_err(|e| e.to_string())?;
+
         let (mut min_frame, mut max_frame) = (u32::MAX, 0u32);
         let (mut total, mut number) = (0u64, 0u64);
         let mut raw = vec![0u8; BLOCK * ch * 4];
@@ -238,15 +258,13 @@ pub fn rewrite_verbatim(flac: &Path, pcm: &Path) -> Result<(), String> {
             min_frame = min_frame.min(frame.len() as u32);
             max_frame = max_frame.max(frame.len() as u32);
             first_block.get_or_insert(n);
-            frames.write_all(&frame).map_err(|e| e.to_string())?;
+            out.write_all(&frame).map_err(|e| e.to_string())?;
             total += n as u64;
             number += 1;
             if n < BLOCK {
                 break;
             }
         }
-        frames.flush().map_err(|e| e.to_string())?;
-        drop(frames);
         if info.total_samples != 0 && total != info.total_samples {
             return Err(format!("decoded {total} samples, FLAC header says {}", info.total_samples));
         }
@@ -259,29 +277,15 @@ pub fn rewrite_verbatim(flac: &Path, pcm: &Path) -> Result<(), String> {
         let (min_frame, max_frame) = if total == 0 { (0, 0) } else { (min_frame, max_frame) };
         si[4..7].copy_from_slice(&min_frame.to_be_bytes()[1..]);
         si[7..10].copy_from_slice(&max_frame.to_be_bytes()[1..]);
-
-        let kept: Vec<&Block> = blocks.iter().skip(1).filter(|b| b.kind != 3).collect();
-        let out_path = flac.with_extension("verbatim.flac.tmp");
-        let mut out = BufWriter::new(File::create(&out_path).map_err(|e| e.to_string())?);
-        let mut head = b"fLaC".to_vec();
-        let mut push_block = |kind: u8, data: &[u8], last: bool| {
-            let len = data.len() as u32;
-            head.push(kind | if last { 0x80 } else { 0 });
-            head.extend_from_slice(&len.to_be_bytes()[1..]);
-            head.extend_from_slice(data);
-        };
-        push_block(0, &si, kept.is_empty());
-        for (i, b) in kept.iter().enumerate() {
-            push_block(b.kind, &b.data, i + 1 == kept.len());
-        }
-        out.write_all(&head).map_err(|e| e.to_string())?;
-        std::io::copy(&mut File::open(&tmp).map_err(|e| e.to_string())?, &mut out).map_err(|e| e.to_string())?;
-        out.flush().map_err(|e| e.to_string())?;
-        drop(out);
+        let mut file = out.into_inner().map_err(|e| e.to_string())?;
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::Start(si_at)).map_err(|e| e.to_string())?;
+        file.write_all(&si).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
         fs::rename(&out_path, flac).map_err(|e| e.to_string())
     })();
-    let _ = fs::remove_file(&tmp);
-    let _ = fs::remove_file(flac.with_extension("verbatim.flac.tmp"));
+    let _ = fs::remove_file(&out_path);
     result
 }
 
