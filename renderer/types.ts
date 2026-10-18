@@ -72,6 +72,8 @@ export interface AudioFile {
   sourceLossless?: boolean;
   /** Sample rate of the source file; sampleRate follows the tab settings. */
   sourceSampleRate?: number;
+  /** Channel count of the source file; channels follows the tab settings. */
+  sourceChannels?: number;
   normalizationApplied: boolean;
   gainMultiplier?: number;
   originalDeleted?: boolean;

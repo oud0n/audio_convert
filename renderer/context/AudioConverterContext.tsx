@@ -131,7 +131,8 @@ function imageTrackRecords(
       id: Math.random().toString(36).substring(2, 11),
       name: `${pad} ${t.title || fileName.replace(/\.[^.]+$/, '')}.${ext}`,
       path: t.audioPath,
-      size: 0,
+      // Estimated from the stream's bitrate (the tracks share one file).
+      size: format.bitrate ? Math.round(format.bitrate / 8 * Math.max(0, end - t.start)) : 0,
       duration: Math.round(Math.max(0, end - t.start) * 10) / 10,
       originalFormat: ext,
       outputFormat,
@@ -139,6 +140,7 @@ function imageTrackRecords(
       sampleRate: format.sampleRate,
       sourceSampleRate: format.sampleRate,
       channels: format.numberOfChannels || 2,
+      sourceChannels: format.numberOfChannels || 2,
       status: 'queued' as const,
       progress: 0,
       normalizationApplied: false,
@@ -475,8 +477,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                 ...f,
                 outputFormat: nextSettings.outputFormat,
                 bitrate: nextSettings.bitrate,
-                sampleRate: nextSettings.sampleRate,
-                channels: nextSettings.channels,
+                // "Same as source" keeps the file's own rate and channels.
+                sampleRate: nextSettings.sameAsSource ? (f.sourceSampleRate ?? f.sampleRate) : nextSettings.sampleRate,
+                channels: nextSettings.sameAsSource ? (f.sourceChannels ?? f.channels) : nextSettings.channels,
               };
             }
             return f;
@@ -660,6 +663,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               sampleRate: format.sampleRate,
               sourceSampleRate: format.sampleRate,
               channels: format.numberOfChannels || 2,
+              sourceChannels: format.numberOfChannels || 2,
               status: 'queued',
               progress: 0,
               normalizationApplied: false,
@@ -745,6 +749,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                   sampleRate: nativeSampleRate,
                   sourceSampleRate: nativeSampleRate,
                   channels: nativeChannels,
+                  sourceChannels: nativeChannels,
                   status: 'queued',
                   progress: 0,
                   normalizationApplied: false,
@@ -842,6 +847,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                             sampleRate: nativeSampleRate,
                             sourceSampleRate: nativeSampleRate,
                             channels: nativeChannels,
+                            sourceChannels: nativeChannels,
                             status: 'queued',
                             progress: 0,
                             normalizationApplied: false,
@@ -1065,6 +1071,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           id: Math.random().toString(36).substring(2, 11),
           name: `${String(c + 1).padStart(2, '0')} ${names[c] || `c${c + 1}`} ${f.name}`,
           channels: 1,
+          sourceChannels: 1,
           status: 'queued' as const,
           progress: 0,
           error: undefined,
@@ -1103,7 +1110,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         if (res.tracks.length < 2) continue;
         const meta: MetadataResult = {
           success: true,
-          format: { duration: f.duration, sampleRate: f.sourceSampleRate ?? f.sampleRate, numberOfChannels: f.channels, bitrate: 0, lossless: f.sourceLossless },
+          format: { duration: f.duration, sampleRate: f.sourceSampleRate ?? f.sampleRate, numberOfChannels: f.sourceChannels ?? f.channels, bitrate: 0, lossless: f.sourceLossless },
           tags: { ...f.tags, totalTracks: f.tags.totalTracks ?? '', totalDiscs: f.tags.totalDiscs ?? '' },
         };
         const stem = f.name.replace(/\.[^.]+$/, '');
@@ -1413,7 +1420,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         ? undefined
         : Math.pow(10, tabSettings.volumeBoostDb / 20);
 
-      addLogToTab(tabId, `[${fileRecord.name}] Step 2: Converting with FFmpeg (resampling: ${tabSettings.sampleRate}Hz, bit depth: ${tabSettings.bitDepth}-bit)...`, 'info');
+      addLogToTab(tabId, tabSettings.sameAsSource
+        ? `[${fileRecord.name}] Step 2: Converting with FFmpeg (same as source: ${fileRecord.sourceSampleRate ?? fileRecord.sampleRate} Hz${tabSettings.maxSampleRate ? `, max ${tabSettings.maxSampleRate} Hz` : ''})...`
+        : `[${fileRecord.name}] Step 2: Converting with FFmpeg (resampling: ${tabSettings.sampleRate}Hz, bit depth: ${tabSettings.bitDepth}-bit)...`, 'info');
       updateFileStatus(tabId, id, 'converting', 0);
 
       let savedOutputPath = '';
@@ -1749,8 +1758,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
             outputFileName: undefined,
             outputFormat: t.settings.outputFormat,
             bitrate: t.settings.bitrate,
-            sampleRate: t.settings.sampleRate,
-            channels: t.settings.channels,
+            sampleRate: t.settings.sameAsSource ? (f.sourceSampleRate ?? f.sampleRate) : t.settings.sampleRate,
+            channels: t.settings.sameAsSource ? (f.sourceChannels ?? f.channels) : t.settings.channels,
           }))
         };
       }

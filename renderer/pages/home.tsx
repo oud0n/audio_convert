@@ -2078,8 +2078,8 @@ export default function HomeDashboardPage() {
                   />
                   <p>
                     {lang === 'ja' 
-                      ? '※ X-Conv Web Audio エンコーダは、選択されたチャンネル及びビットパラメーターに準拠してクライアント側でローカル変換を実行します。' 
-                      : '* The X-Conv Web Audio encoder performs local conversion on the client side according to the selected channel and bit parameters.'
+                      ? '※ 変換はアプリに同梱した FFmpeg で、このコンピュータ上で行います。'
+                      : '* Conversion runs on this computer with the FFmpeg bundled in the app.'
                     }
                   </p>
                 </div>
