@@ -21,6 +21,8 @@ fn settings(keep: bool) -> ConverterSettings {
         flac_compression_level: None,
         flac_uncompressed: None,
         on_existing: None,
+        keep_folder_levels: None,
+        keep_folder_from: None,
     }
 }
 
@@ -56,9 +58,29 @@ fn safe_file_name_cleans_reserved_and_long_names() {
 fn output_stem_uses_requested_name_without_its_extension() {
     let input = Path::new("/music/source track.flac");
     assert_eq!(output_stem("01-02 Title.m4a", input), "01-02 Title");
-    assert_eq!(output_stem("AC/DC - T.N.T.flac", input), "AC_DC - T.N.T");
+    assert_eq!(output_stem("AC_DC - T.N.T.flac", input), "AC_DC - T.N.T");
     assert_eq!(output_stem("", input), "source track");
     assert_eq!(output_stem(".hidden", input), ".hidden");
+}
+
+#[test]
+fn name_parts_make_safe_subfolders() {
+    let input = Path::new("/music/source track.flac");
+    let parts = |n: &str| output_name_parts(n, input);
+    assert_eq!(parts("Artist/Album\\01 T.m4a"), (vec!["Artist".to_string(), "Album".to_string()], "01 T".to_string()));
+    assert_eq!(parts("../../x"), (vec!["audio".to_string(), "audio".to_string()], "x".to_string()));
+    assert_eq!(parts("/abs/C:/x"), (vec!["abs".to_string(), "C_".to_string()], "x".to_string()));
+    assert_eq!(parts("dir/"), (vec![], "dir".to_string()));
+    assert_eq!(parts(""), (vec![], "source track".to_string()));
+}
+
+#[test]
+fn kept_source_folders_take_first_or_last_levels() {
+    let input = Path::new("/Music/Artist/Album/CD1/01.flac");
+    assert_eq!(kept_source_folders(input, 2, false), ["Album", "CD1"]);
+    assert_eq!(kept_source_folders(input, 2, true), ["Music", "Artist"]);
+    assert_eq!(kept_source_folders(input, 0, false), Vec::<String>::new());
+    assert_eq!(kept_source_folders(input, 9, false), ["Music", "Artist", "Album", "CD1"]);
 }
 
 #[test]
@@ -431,6 +453,30 @@ fn converts_24_bit_losslessly_with_requested_name_cover_and_tags() {
     assert_eq!(name, "01-02 Renamed_2.flac");
     let leftovers: Vec<_> = fs::read_dir(&out).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).collect();
     assert!(leftovers.is_empty(), "staging files must be removed");
+}
+
+#[test]
+fn output_keeps_source_folders_and_pattern_subfolders() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let album = d.0.join("Artist").join("Album");
+    fs::create_dir_all(&album).unwrap();
+    let src = album.join("a.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=0.3", src.to_str().unwrap()]);
+    let out = d.0.join("out");
+    let mut req = request(&src, &out, "FLAC", "Disc 1/01 Song");
+    req.settings.keep_folder_levels = Some(2);
+    let (path, name) = convert_blocking(&ctx(), &req).unwrap();
+    assert_eq!(path, out.join("Artist").join("Album").join("Disc 1").join("01 Song.flac"));
+    assert_eq!(name, "01 Song.flac");
+
+    // In the source folder, only the pattern's subfolders are added.
+    req.settings.save_in_source_folder = Some(true);
+    let (path, _) = convert_blocking(&ctx(), &req).unwrap();
+    let album = simplify_verbatim_path(fs::canonicalize(&album).unwrap());
+    assert_eq!(path, album.join("Disc 1").join("01 Song.flac"));
 }
 
 #[test]

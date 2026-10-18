@@ -117,8 +117,9 @@ export function safeFileName(name: string): string {
 }
 
 /**
- * Builds the output file name stem (no extension) from a pattern.
- * Folder separators are replaced, so neither tags nor the pattern can create folders.
+ * Builds the output file name stem (no extension) from a pattern. A `\\` or `/` written
+ * in the pattern makes a subfolder (xrecode style), e.g. `%artist%\\%album%\\%title%`;
+ * separators inside tag values never do. The result uses `/` between folders.
  */
 export function renderFileName(pattern: string, tags: PatternTags, sourceFileName: string): string {
   const alternatives = normalizePattern(pattern || '').split('|');
@@ -127,9 +128,10 @@ export function renderFileName(pattern: string, tags: PatternTags, sourceFileNam
     const result = alt.replace(/%([a-z0-9]+)%/gi, (_, token: string) => {
       const value = resolveToken(token, tags, sourceFileName);
       if (value === undefined) { ok = false; return ''; }
-      return value;
-    }).trim();
-    if (ok && result) return safeFileName(result);
+      return value.replace(/[\\/]/g, '_');
+    });
+    const parts = result.split(/[\\/]/).map((p) => p.trim()).filter(Boolean);
+    if (ok && parts.length) return parts.map(safeFileName).join('/');
   }
   return safeFileName(stem(sourceFileName));
 }

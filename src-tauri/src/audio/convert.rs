@@ -60,6 +60,12 @@ pub struct ConverterSettings {
     /// What to do when the output file already exists: "rename" (default), "overwrite", "skip".
     #[serde(rename = "onExisting")]
     pub on_existing: Option<String>,
+    /// Source folders recreated under the output folder (0 / None = none), counted
+    /// from the end of the source's folder path ("last", default) or its start ("first").
+    #[serde(rename = "keepFolderLevels")]
+    pub keep_folder_levels: Option<u32>,
+    #[serde(rename = "keepFolderFrom")]
+    pub keep_folder_from: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -228,16 +234,41 @@ pub fn safe_file_name(name: &str) -> String {
 /// Output stem from the requested file name: its extension is dropped because the
 /// output format decides the extension.
 pub fn output_stem(requested: &str, input_path: &Path) -> String {
-    let requested = requested.trim();
-    let stem = if requested.is_empty() {
+    output_name_parts(requested, input_path).1
+}
+
+/// Subfolders and stem from the requested name. `/` or `\\` in it (from the file name
+/// pattern) make subfolders; every part is made safe, so none can be `..` or absolute.
+pub fn output_name_parts(requested: &str, input_path: &Path) -> (Vec<String>, String) {
+    let mut parts: Vec<&str> = requested.split(['/', '\\']).map(str::trim).filter(|p| !p.is_empty()).collect();
+    let last = parts.pop().unwrap_or("");
+    let stem = if last.is_empty() {
         input_path.file_stem().and_then(|s| s.to_str()).unwrap_or("audio").to_string()
     } else {
-        match requested.rfind('.') {
-            Some(i) if i > 0 => requested[..i].to_string(),
-            _ => requested.to_string(),
+        match last.rfind('.') {
+            Some(i) if i > 0 => last[..i].to_string(),
+            _ => last.to_string(),
         }
     };
-    safe_file_name(&stem)
+    (parts.into_iter().map(safe_file_name).collect(), safe_file_name(&stem))
+}
+
+/// The source's folders to recreate under the output folder (xrecode "keep folder
+/// structure"): the last or first `levels` folders of the source's path.
+pub fn kept_source_folders(input: &Path, levels: u32, from_start: bool) -> Vec<String> {
+    let folders: Vec<String> = input
+        .parent()
+        .map(|p| {
+            p.components()
+                .filter_map(|c| match c {
+                    std::path::Component::Normal(n) => Some(safe_file_name(&n.to_string_lossy())),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let n = (levels as usize).min(folders.len());
+    if from_start { folders[..n].to_vec() } else { folders[folders.len() - n..].to_vec() }
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,9 +1481,19 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
     let format = OutFormat::parse(&request.output_format)
         .ok_or_else(|| format!("Unsupported output format: {}", request.output_format))?;
     let ext = format.ext();
-    let dir = target_dir(request, &input)?;
+    let mut dir = target_dir(request, &input)?;
+    if !request.settings.save_in_source_folder.unwrap_or(false) {
+        let levels = request.settings.keep_folder_levels.unwrap_or(0);
+        let from_start = request.settings.keep_folder_from.as_deref() == Some("first");
+        for folder in kept_source_folders(&input, levels, from_start) {
+            dir.push(folder);
+        }
+    }
+    let (subfolders, stem) = output_name_parts(&request.file_name, &input);
+    for folder in subfolders {
+        dir.push(folder);
+    }
     fs::create_dir_all(&dir).map_err(|e| format!("Cannot create output folder {}: {e}", dir.display()))?;
-    let stem = output_stem(&request.file_name, &input);
     let on_existing = match request.settings.on_existing.as_deref() {
         Some("overwrite") => OnExisting::Overwrite,
         Some("skip") => OnExisting::Skip,

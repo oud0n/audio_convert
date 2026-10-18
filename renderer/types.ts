@@ -106,6 +106,8 @@ export interface ConverterSettings {
   flacCompressionLevel?: number; // 0-8
   flacUncompressed?: boolean; // FLAC without compression (overrides the level)
   onExisting?: 'rename' | 'overwrite' | 'skip'; // when the output file already exists
+  keepFolderLevels?: number; // source folders recreated under the output folder (0 = none)
+  keepFolderFrom?: 'last' | 'first'; // count them from the end or the start of the source path
 }
 
 export interface SettingsPreset {

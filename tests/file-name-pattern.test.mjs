@@ -53,7 +53,6 @@ test('lossless source detection prefers the backend codec', () => {
 
 test('names are made safe the same way as the converter', () => {
   assert.equal(renderFileName('%artist%: %title%?', { artist: 'A', title: 'B' }, 'f'), 'A_ B_');
-  assert.equal(renderFileName('%title%/sub', { title: 'B' }, 'f'), 'B_sub', 'pattern cannot create folders');
   assert.equal(safeFileName('name. . '), 'name');
   assert.equal(safeFileName('CON'), '_CON');
   assert.equal(safeFileName(''), 'audio');
@@ -76,4 +75,13 @@ test('round 4: totals from edits, extensionless names, idempotent safety', () =>
   assert.equal(isLosslessSource(undefined, 'wav'), false);
   const name = 'CON.' + ' '.repeat(175) + 'a';
   assert.equal(safeFileName(safeFileName(name)), safeFileName(name));
+});
+
+test('separators written in the pattern make subfolders', () => {
+  const tags = { artist: 'AC/DC', album: 'Back\\In Black', title: 'Hells: Bells', track: '1' };
+  assert.equal(renderFileName('%artist%\\%album%\\%track2% %title%', tags, 'f'), 'AC_DC/Back_In Black/01 Hells_ Bells');
+  assert.equal(renderFileName('%title%/sub', { title: 'B' }, 'f'), 'B/sub');
+  assert.equal(renderFileName(' a / .. / b ', {}, 'f'), 'a/audio/b', 'dot folders are not kept');
+  assert.equal(renderFileName('%album%/%title%|%filename%', { title: 'T' }, 'src.flac'), 'src', 'missing tag falls back');
+  assert.equal(renderFileName('/', {}, 'src.flac'), 'src');
 });

@@ -111,6 +111,8 @@ const defaultSettings: ConverterSettings = {
   flacCompressionLevel: 5,
   flacUncompressed: false,
   onExisting: 'rename',
+  keepFolderLevels: 0,
+  keepFolderFrom: 'last',
 };
 
 export const AudioConverterProvider = ({ children }: { children: React.ReactNode }) => {
