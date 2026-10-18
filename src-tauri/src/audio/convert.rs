@@ -113,10 +113,15 @@ pub const IMAGE_AUDIO_EXTENSIONS: &[&str] = &["flac", "wav", "ape", "wv", "tta",
 
 impl ConvertRequest {
     fn range(&self) -> Option<(f64, Option<f64>)> {
-        let start = self.start_seconds.filter(|s| s.is_finite() && *s >= 0.0);
-        let end = self.end_seconds.filter(|e| e.is_finite() && *e > start.unwrap_or(0.0));
-        (start.is_some() || end.is_some()).then(|| (start.unwrap_or(0.0), end))
+        track_range(self.start_seconds, self.end_seconds)
     }
+}
+
+/// A valid track range from optional start / end seconds (None = the whole file).
+pub fn track_range(start: Option<f64>, end: Option<f64>) -> Option<(f64, Option<f64>)> {
+    let start = start.filter(|s| s.is_finite() && *s >= 0.0);
+    let end = end.filter(|e| e.is_finite() && *e > start.unwrap_or(0.0));
+    (start.is_some() || end.is_some()).then(|| (start.unwrap_or(0.0), end))
 }
 
 /// FFmpeg filter cutting `range` (seconds) out of the input, sample-exact when the
@@ -1578,6 +1583,12 @@ fn convert_blocking(ctx: &JobCtx, request: &ConvertRequest) -> Result<(PathBuf, 
 }
 
 fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Converted, String> {
+    convert_core(ctx, request, None)
+}
+
+/// Converts `request`. `folder_source` decides the output folder ("source folder", kept
+/// folders) when the input is an intermediate file (merging); None = the input itself.
+fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&Path>) -> Result<Converted, String> {
     // Absolute, resolved input path: FFmpeg reads relative names like "concat:a|b"
     // or "-x" as protocols/options.
     let input = fs::canonicalize(&request.input_file_path)
@@ -1589,11 +1600,12 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
     let format = OutFormat::parse(&request.output_format)
         .ok_or_else(|| format!("Unsupported output format: {}", request.output_format))?;
     let ext = format.ext();
-    let mut dir = target_dir(request, &input)?;
+    let folder_source = folder_source.unwrap_or(&input);
+    let mut dir = target_dir(request, folder_source)?;
     if !request.settings.save_in_source_folder.unwrap_or(false) {
         let levels = request.settings.keep_folder_levels.unwrap_or(0);
         let from_start = request.settings.keep_folder_from.as_deref() == Some("first");
-        for folder in kept_source_folders(&input, levels, from_start) {
+        for folder in kept_source_folders(folder_source, levels, from_start) {
             dir.push(folder);
         }
     }
@@ -2002,6 +2014,7 @@ pub async fn move_output_into_place(from: String, to: String) -> ConvertResponse
 }
 
 mod flac_verbatim;
+pub mod merge;
 
 #[cfg(test)]
 mod tests;

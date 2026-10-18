@@ -1163,6 +1163,27 @@ export default function HomeDashboardPage() {
                       />
                       <span>{t(lang, 'splitImages')}</span>
                     </label>
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-2 text-zinc-400 cursor-pointer hover:text-zinc-250" title={t(lang, 'mergeOutputHelp')}>
+                        <input
+                          type="checkbox"
+                          checked={settings.mergeOutput ?? false}
+                          onChange={(e) => updateSetting('mergeOutput', e.target.checked)}
+                          className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer"
+                        />
+                        <span>{t(lang, 'mergeOutput')}</span>
+                      </label>
+                      <label className={`flex items-center gap-2 text-zinc-400 cursor-pointer hover:text-zinc-250 ${settings.mergeOutput ? '' : 'opacity-40'}`}>
+                        <input
+                          type="checkbox"
+                          disabled={!settings.mergeOutput}
+                          checked={settings.mergeCreateCue ?? true}
+                          onChange={(e) => updateSetting('mergeCreateCue', e.target.checked)}
+                          className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer"
+                        />
+                        <span>{t(lang, 'mergeCreateCue')}</span>
+                      </label>
+                    </div>
                     <div className={`flex items-center gap-1.5 text-zinc-400 ${settings.saveInSourceFolder ? 'opacity-40' : ''}`}>
                       <span>{t(lang, 'keepFolders')}</span>
                       <select

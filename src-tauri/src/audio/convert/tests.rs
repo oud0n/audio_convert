@@ -543,6 +543,62 @@ fn chapters_split_an_audio_file() {
 }
 
 #[test]
+fn merge_joins_sources_and_writes_a_cue_sheet() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let first = make_source(&d.0); // 96 kHz 24-bit stereo with a cover, 1 s
+    let second = d.0.join("second.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=300:sample_rate=44100:duration=2", "-c:a", "pcm_s16le", second.to_str().unwrap()]);
+    let mut st = settings(true);
+    st.local_save_path = Some(d.0.join("out").to_string_lossy().into_owned());
+    let req = merge::MergeRequest {
+        inputs: vec![
+            merge::MergeInput { path: first.to_string_lossy().into_owned(), start_seconds: None, end_seconds: None, title: "One".into(), artist: "A".into() },
+            // Only 0.5 s .. 1.5 s of the second file (a track of an image).
+            merge::MergeInput { path: second.to_string_lossy().into_owned(), start_seconds: Some(0.5), end_seconds: Some(1.5), title: "Two \"x\"".into(), artist: String::new() },
+        ],
+        file_name: "Album".into(),
+        output_format: "FLAC".into(),
+        job_id: None,
+        settings: st,
+        tags: Some(InputTags { album: Some("Album".into()), album_artist: Some("A".into()), ..Default::default() }),
+        create_cue: Some(true),
+        verify: Some(true),
+    };
+    let m = merge::merge_blocking(&ctx(), &req).unwrap();
+    // The second part was resampled (44.1 -> 96 kHz): no bit-exact claim.
+    assert_eq!(m.verified.as_ref().map(|v| v.0), Some(false));
+    let ff = get_ffmpeg_executable();
+    let info = probe_source(&ff, &m.converted.path).unwrap();
+    assert_eq!((info.sample_rate, info.channels, info.bits_per_sample), (Some(96000), Some(2), Some(24)));
+    assert!((info.duration - 2.0).abs() < 0.01, "{}", info.duration);
+    assert!(info.has_art(), "the first source's cover is kept");
+    let cue = fs::read_to_string(m.cue.as_ref().unwrap()).unwrap();
+    assert!(cue.contains("FILE \"Album.flac\" WAVE"), "{cue}");
+    assert!(cue.contains("TRACK 02 AUDIO\r\n    TITLE \"Two 'x'\"\r\n    INDEX 01 00:01:00"), "{cue}");
+    // The sheet reads back as the two tracks.
+    let back = crate::audio::cue::read_image_tracks(m.cue.as_ref().unwrap());
+    assert_eq!(back.tracks.len(), 2);
+    assert_eq!(back.tracks[1].start, 1.0);
+    // The first second is the first source, bit for bit.
+    let (h1, _) = crate::audio::audit::compute_pcm_fingerprint_range(&first.to_string_lossy(), None, &|| false).unwrap();
+    let (h2, _) = crate::audio::audit::compute_pcm_fingerprint_range(&m.converted.path.to_string_lossy(), Some((0.0, Some(1.0))), &|| false).unwrap();
+    assert_eq!(h1, h2);
+    assert_eq!(merge::cue_time(44100 * 61 + 588, 44100), "01:01:01");
+
+    // Same-format parts verify as bit-exact.
+    let third = d.0.join("third.flac");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=700:sample_rate=96000:duration=0.7", "-ac", "2", "-c:a", "flac", "-sample_fmt", "s32", "-bits_per_raw_sample", "24", third.to_str().unwrap()]);
+    let mut req2 = req.clone();
+    req2.inputs[1] = merge::MergeInput { path: third.to_string_lossy().into_owned(), start_seconds: None, end_seconds: None, title: "Three".into(), artist: String::new() };
+    let m2 = merge::merge_blocking(&ctx(), &req2).unwrap();
+    assert_eq!(m2.verified, Some((true, "All 2 parts are bit-exact with their sources".to_string())));
+    assert!(m2.cue.unwrap().ends_with("Album_2.cue"));
+}
+
+#[test]
 fn hi_res_source_to_mp3_and_opus_succeeds() {
     if !ffmpeg_available() {
         return;

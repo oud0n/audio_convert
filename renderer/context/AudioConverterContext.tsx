@@ -184,6 +184,8 @@ const defaultSettings: ConverterSettings = {
   flacUncompressed: false,
   onExisting: 'rename',
   splitImages: true,
+  mergeOutput: false,
+  mergeCreateCue: true,
   keepFolderLevels: 0,
   keepFolderFrom: 'last',
   bitrateMode: 'vbr',
@@ -226,6 +228,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const activeConversionTabIdRef = useRef<string | null>(null);
   const jobRef = useRef<{ id: string; cancelled: boolean } | null>(null);
   const batchRef = useRef({ success: 0, failed: 0, warnings: 0 });
+  /** Rows being merged into one output (they share the progress). */
+  const mergeIdsRef = useRef<Set<string>>(new Set());
   /** Files of the running batch (files added while it runs are not part of it). */
   const batchFileIdsRef = useRef<Set<string>>(new Set());
   /** Album images in the running batch: their tracks, and those ready for the trash. */
@@ -238,8 +242,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       if (event.jobId !== jobRef.current?.id || jobRef.current.cancelled) return;
       const tabId = activeConversionTabIdRef.current;
       const fileId = activeConversionIdRef.current;
-      if (tabId && fileId) setTabs(prev => prev.map(tab => tab.id === tabId ? {
-        ...tab, files: tab.files.map(file => file.id === fileId ? { ...file, status: event.phase as any, progress: event.progress } : file)
+      const merging = mergeIdsRef.current;
+      if (tabId && (fileId || merging.size)) setTabs(prev => prev.map(tab => tab.id === tabId ? {
+        ...tab, files: tab.files.map(file => file.id === fileId || merging.has(file.id) ? { ...file, status: event.phase as any, progress: event.progress } : file)
       } : tab));
     });
   }, []);
@@ -990,8 +995,90 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     // Protect every queued source from "overwrite" before the first file starts.
     await AppBridge.setQueuedSources(queued.map((f) => f.path || "").filter(Boolean)).catch(() => {});
     
+    if (currentTab.settings.mergeOutput && queued.length >= 2) {
+      conversionQueueRef.current = [];
+      addLogToTab(targetTabId, lang === 'ja' ? `${queued.length}個のファイルを 1 つに結合します...` : `Merging ${queued.length} items into one file...`, 'info');
+      await runMergeWorkflow(targetTabId, queued);
+      finishBatch(targetTabId);
+      return;
+    }
     addLogToTab(targetTabId, lang === 'ja' ? `${queued.length}個のファイルのバッチ処理を開始します...` : `Starting batch pipeline for ${queued.length} items...`, 'info');
     processNextInQueue();
+  };
+
+  /** Joins the batch into one output (xrecode "many to one") and writes a CUE sheet. */
+  const runMergeWorkflow = async (tabId: string, files: AudioFile[]) => {
+    const tab = tabsRef.current.find(t => t.id === tabId);
+    if (!tab) return;
+    const tabSettings = tab.settings;
+    const ids = new Set(files.map(f => f.id));
+    const job = { id: crypto.randomUUID(), cancelled: false };
+    jobRef.current = job;
+    mergeIdsRef.current = ids;
+    const setRows = (patch: (f: AudioFile) => Partial<AudioFile>) => setTabs(prev => prev.map(t => t.id === tabId ? {
+      ...t, files: t.files.map(f => ids.has(f.id) ? { ...f, ...patch(f) } : f),
+    } : t));
+    const first = files[0];
+    const performer = first.tags.albumArtist || first.tags.artist || '';
+    const albumTags = {
+      title: first.tags.album || '', album: first.tags.album || '', artist: performer, albumArtist: performer,
+      year: first.tags.year || '', genre: first.tags.genre || '', disc: first.tags.disc || '',
+    };
+    const stemName = renderFileName('%albumartist% - %album%|%album%|%filename%', albumTags, first.name);
+    try {
+      await AppBridge.startConversionJob(job.id);
+      setRows(() => ({ status: 'converting', progress: 0, error: undefined }));
+      const res = await AppBridge.mergeAudio({
+        jobId: job.id,
+        inputs: files.map(f => ({ path: f.path, startSeconds: f.trackStart ?? null, endSeconds: f.trackEnd ?? null, title: f.tags.title || '', artist: f.tags.artist && f.tags.artist !== performer ? f.tags.artist : '' })),
+        fileName: `${stemName}.${getFormatExtension(tabSettings.outputFormat)}`,
+        outputFormat: tabSettings.outputFormat,
+        settings: tabSettings,
+        tags: albumTags,
+        createCue: tabSettings.mergeCreateCue ?? true,
+        verify: tabSettings.autoVerifyQuality,
+      });
+      if (!res.success || !res.path) throw new Error(res.error || 'Merge failed');
+      if (res.skipped) {
+        batchRef.current.success += files.length;
+        addLogToTab(tabId, lang === 'ja' ? `出力先に同名のファイルがあるためスキップしました: "${res.path}"` : `Skipped: the output file already exists: "${res.path}"`, 'info');
+        setRows(() => ({ status: 'completed', progress: 100, outputPath: res.path!, outputFileName: res.fileName || undefined }));
+        return;
+      }
+      addLogToTab(tabId, lang === 'ja' ? `結合した出力を保存しました: "${res.path}"` : `Saved the merged output: "${res.path}"`, 'success');
+      if (res.cuePath) addLogToTab(tabId, lang === 'ja' ? `CUE シートを作成しました: "${res.cuePath}"` : `Wrote the CUE sheet: "${res.cuePath}"`, 'success');
+      if (res.verifyNote) addLogToTab(tabId, `${lang === 'ja' ? '品質検証' : 'Quality check'}: ${res.verifyNote}`, res.verified ? 'success' : 'error');
+      const checksPassed = !tabSettings.autoVerifyQuality || res.verified === true;
+      if (!checksPassed) batchRef.current.warnings++;
+      let originalDeleted = false;
+      if (tabSettings.deleteOriginalAfterConvert && checksPassed && !job.cancelled) {
+        // Each source once, then the CUE sheets of image tracks.
+        const paths = Array.from(new Set([...files.map(f => f.path || ''), ...files.map(f => f.cuePath || '')].filter(Boolean)));
+        originalDeleted = true;
+        for (const p of paths) {
+          if (p === res.path) continue;
+          const r = await AppBridge.trashFile(p).catch((e: any) => ({ success: false, error: String(e?.message || e) }));
+          if (!r?.success) {
+            originalDeleted = false;
+            batchRef.current.warnings++;
+            addLogToTab(tabId, lang === 'ja' ? `元ファイルのゴミ箱への移動に失敗しました: "${p}": ${r?.error}` : `Failed to move the original to the trash: "${p}": ${r?.error}`, 'error');
+          }
+        }
+        if (originalDeleted) addLogToTab(tabId, lang === 'ja' ? '元ファイルをゴミ箱に移動しました。' : 'Moved the originals to the trash.', 'success');
+      }
+      batchRef.current.success += files.length;
+      setRows(() => ({ status: 'completed', progress: 100, outputPath: res.path!, outputFileName: res.fileName || undefined, originalDeleted }));
+    } catch (err: any) {
+      if (!job.cancelled) batchRef.current.failed += files.length;
+      addLogToTab(tabId, lang === 'ja' ? `結合に失敗しました: ${err.message}` : `Merge failed: ${err.message}`, 'error');
+      setRows(() => ({ status: 'failed', progress: 0, error: err.message || 'Merge failed' }));
+    } finally {
+      await AppBridge.finishConversionJob(job.id).catch(() => {});
+      jobRef.current = null;
+      mergeIdsRef.current = new Set();
+      // Merged rows are not album-image tracks waiting for their own trash step.
+      imageGroupsRef.current = new Map();
+    }
   };
 
   const processNextInQueue = () => {

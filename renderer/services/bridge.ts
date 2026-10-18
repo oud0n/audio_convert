@@ -62,6 +62,18 @@ export interface ImageTracksResult {
   error?: string | null;
 }
 
+export interface MergeResult {
+  success: boolean;
+  path?: string | null;
+  fileName?: string | null;
+  cuePath?: string | null;
+  skipped?: boolean;
+  /** Every part is bit-exact with its source (only when verification was asked). */
+  verified?: boolean | null;
+  verifyNote?: string | null;
+  error?: string | null;
+}
+
 export interface VerificationResponse {
   success: boolean;
   result?: QualityVerificationResult;
@@ -200,6 +212,15 @@ export class AppBridge {
       return await ipc.invoke<ConvertResult>('save-converted-file', request);
     }
     throw new Error('No desktop runtime detected');
+  }
+
+  /** Joins several sources (track ranges allowed) into one output, with a CUE sheet. */
+  static async mergeAudio(request: any): Promise<MergeResult> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<MergeResult>('merge_audio', { request });
+    }
+    return { success: false, error: 'Merging needs the desktop app' };
   }
 
   /** Renames a finished output to `to` in the same folder; never replaces an existing file. */

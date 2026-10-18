@@ -121,6 +121,8 @@ export interface ConverterSettings {
   keepFolderLevels?: number; // source folders recreated under the output folder (0 = none)
   keepFolderFrom?: 'last' | 'first'; // count them from the end or the start of the source path
   splitImages?: boolean; // split CUE sheets (and embedded sheets / chapters) into tracks
+  mergeOutput?: boolean; // join the whole batch into one output file
+  mergeCreateCue?: boolean; // write a CUE sheet next to the merged file
   bitrateMode?: 'cbr' | 'vbr'; // MP3 / AAC / Vorbis: fixed bitrate or quality-based VBR
   vbrQuality?: number; // LAME V scale, 0 (best) to 9; AAC and Vorbis get the equivalent
 }
