@@ -25,6 +25,12 @@ fn settings(keep: bool) -> ConverterSettings {
         keep_folder_from: None,
         bitrate_mode: None,
         vbr_quality: None,
+        cover_external: None,
+        cover_resize: None,
+        cover_max_width: None,
+        cover_max_height: None,
+        cover_format: None,
+        save_cover_file: None,
     }
 }
 
@@ -144,6 +150,8 @@ fn src(bits: u32, rate: u32, ch: u32, lossless: bool, float: bool) -> SourceInfo
         custom_layout: false,
         codec: Some(if lossless { "flac".into() } else { "mp3".into() }),
         range: None,
+        external_cover: None,
+        cover_is_png: false,
     }
 }
 
@@ -638,6 +646,45 @@ fn replaygain_tags_are_written_without_touching_the_audio() {
         assert!(written_from_other_source(p, &d.0.join("cover.png"), None), "{}", p.display());
     }
     assert!(probe_source(&ff, &paths[0]).unwrap().has_art(), "FLAC keeps its cover");
+}
+
+#[test]
+fn external_covers_are_embedded_resized_and_saved() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let album = d.0.join("album");
+    fs::create_dir_all(&album).unwrap();
+    let src = album.join("a.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=0.3", src.to_str().unwrap()]);
+    ffmpeg(&["-f", "lavfi", "-i", "color=c=blue:s=900x600:d=1", "-frames:v", "1", album.join("Folder.PNG").to_str().unwrap()]);
+    let out = d.0.join("out");
+    let ff = get_ffmpeg_executable();
+
+    let (plain, _) = convert_blocking(&ctx(), &request(&src, &out, "FLAC", "plain")).unwrap();
+    let info = probe_source(&ff, &plain).unwrap();
+    assert!(info.has_art() && info.cover_is_png, "the external PNG is embedded as is");
+
+    let mut req = request(&src, &out, "M4A", "small");
+    req.settings.cover_resize = Some(true);
+    req.settings.cover_format = Some("jpeg".into());
+    req.settings.save_cover_file = Some(true);
+    let (small, _) = convert_blocking(&ctx(), &req).unwrap();
+    let info = probe_source(&ff, &small).unwrap();
+    assert!(info.has_art() && !info.cover_is_png, "converted to JPEG");
+    let probe = String::from_utf8_lossy(&hidden_command(&ff).arg("-i").arg(&small).output().unwrap().stderr).into_owned();
+    assert!(probe.contains("400x266"), "shrunk to fit 400x400: {probe}");
+    let saved = out.join("folder.jpg");
+    assert!(saved.is_file(), "folder.jpg saved");
+    let before = fs::read(&saved).unwrap();
+    convert_blocking(&ctx(), &req).unwrap();
+    assert_eq!(fs::read(&saved).unwrap(), before, "an existing folder.jpg is kept");
+
+    let mut off = request(&src, &out, "FLAC", "none");
+    off.settings.cover_external = Some(false);
+    let (none, _) = convert_blocking(&ctx(), &off).unwrap();
+    assert!(!probe_source(&ff, &none).unwrap().has_art());
 }
 
 #[test]

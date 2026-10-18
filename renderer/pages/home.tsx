@@ -1184,6 +1184,35 @@ export default function HomeDashboardPage() {
                         <span>{t(lang, 'mergeCreateCue')}</span>
                       </label>
                     </div>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-zinc-400">
+                      <label className="flex items-center gap-1.5 cursor-pointer" title={t(lang, 'coverExternalHelp')}>
+                        <input type="checkbox" checked={settings.coverExternal ?? true} onChange={(e) => updateSetting('coverExternal', e.target.checked)} className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer" />
+                        <span>{t(lang, 'coverExternal')}</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input type="checkbox" checked={settings.saveCoverFile ?? false} onChange={(e) => updateSetting('saveCoverFile', e.target.checked)} className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer" />
+                        <span>{t(lang, 'saveCoverFile')}</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input type="checkbox" checked={settings.coverResize ?? false} onChange={(e) => updateSetting('coverResize', e.target.checked)} className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer" />
+                        <span>{t(lang, 'coverResize')}</span>
+                      </label>
+                      <span className={`flex items-center gap-1 ${settings.coverResize ? '' : 'opacity-40'}`}>
+                        <input type="number" min={16} max={4000} disabled={!settings.coverResize} value={settings.coverMaxWidth ?? 400}
+                          onChange={(e) => updateSetting('coverMaxWidth', Math.max(16, Math.min(4000, Math.floor(Number(e.target.value) || 400))))}
+                          className="w-14 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        ×
+                        <input type="number" min={16} max={4000} disabled={!settings.coverResize} value={settings.coverMaxHeight ?? 400}
+                          onChange={(e) => updateSetting('coverMaxHeight', Math.max(16, Math.min(4000, Math.floor(Number(e.target.value) || 400))))}
+                          className="w-14 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                      </span>
+                      <select value={settings.coverFormat ?? 'keep'} onChange={(e) => updateSetting('coverFormat', e.target.value as any)}
+                        className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" title={t(lang, 'coverFormat')}>
+                        <option value="keep">{t(lang, 'coverFormatKeep')}</option>
+                        <option value="jpeg">JPEG</option>
+                        <option value="png">PNG</option>
+                      </select>
+                    </div>
                     <div className="flex items-center gap-1.5 text-zinc-400" title={t(lang, 'replayGainHelp')}>
                       <span>ReplayGain:</span>
                       <select

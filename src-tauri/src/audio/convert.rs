@@ -72,6 +72,23 @@ pub struct ConverterSettings {
     /// VBR quality on LAME's scale: 0 (best, V0) to 9 (smallest, V9). Default 2 (V2).
     #[serde(rename = "vbrQuality")]
     pub vbr_quality: Option<f64>,
+    /// Use cover.jpg / folder.jpg / front.jpg from the source folder when the source has
+    /// no embedded cover (xrecode searchexternalcovers; default on).
+    #[serde(rename = "coverExternal")]
+    pub cover_external: Option<bool>,
+    /// Shrink covers larger than coverMaxWidth x coverMaxHeight (keeps the aspect ratio).
+    #[serde(rename = "coverResize")]
+    pub cover_resize: Option<bool>,
+    #[serde(rename = "coverMaxWidth")]
+    pub cover_max_width: Option<u32>,
+    #[serde(rename = "coverMaxHeight")]
+    pub cover_max_height: Option<u32>,
+    /// "keep" (default), "jpeg" or "png".
+    #[serde(rename = "coverFormat")]
+    pub cover_format: Option<String>,
+    /// Also save the cover as folder.jpg next to the output (never replacing a file).
+    #[serde(rename = "saveCoverFile")]
+    pub save_cover_file: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -411,6 +428,92 @@ pub struct SourceInfo {
     pub codec: Option<String>,
     /// Set for a track of an album image: only this range (seconds) is converted.
     pub range: Option<(f64, Option<f64>)>,
+    /// A cover image file found next to the source (used when none is embedded).
+    pub external_cover: Option<PathBuf>,
+    /// The embedded cover is PNG (else JPEG).
+    pub cover_is_png: bool,
+}
+
+/// Cover image files looked for next to a source without an embedded cover, in order.
+const EXTERNAL_COVER_NAMES: &[&str] = &["cover", "folder", "front", "albumart", "album"];
+
+/// The first cover image file in `dir` (case-insensitive names, JPEG or PNG).
+pub fn find_external_cover(dir: &Path) -> Option<PathBuf> {
+    let mut found: Vec<(usize, PathBuf)> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .filter_map(|p| {
+            let ext = p.extension()?.to_string_lossy().to_ascii_lowercase();
+            if !matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
+                return None;
+            }
+            let stem = p.file_stem()?.to_string_lossy().to_ascii_lowercase();
+            EXTERNAL_COVER_NAMES.iter().position(|n| *n == stem).map(|i| (i, p))
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next().map(|(_, p)| p)
+}
+
+/// Saves the cover (embedded, else the external file) as folder.jpg / folder.png in
+/// `dir`, resized / converted like the embedded one. An existing file is kept.
+fn save_folder_cover(ffmpeg: &Path, input: &Path, source: &SourceInfo, settings: &ConverterSettings, dir: &Path, work: &Path) -> Result<(), String> {
+    let (cover_input, map, is_png) = match (source.cover_stream, &source.external_cover) {
+        (Some(index), _) => (input.to_path_buf(), format!("0:{index}"), source.cover_is_png),
+        (None, Some(file)) => (file.clone(), "0:v:0".to_string(), file.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"))),
+        _ => return Ok(()),
+    };
+    let png = match settings.cover_format.as_deref() {
+        Some("jpeg") => false,
+        Some("png") => true,
+        _ => is_png,
+    };
+    let ext = if png { "png" } else { "jpg" };
+    let destination = dir.join(format!("folder.{ext}"));
+    if destination.exists() {
+        return Ok(());
+    }
+    let temp = work.join(format!("folder.{ext}"));
+    let mut args: Vec<String> = vec!["-nostdin".into(), "-hide_banner".into(), "-loglevel".into(), "error".into(), "-y".into(), "-i".into(), cover_input.to_string_lossy().into_owned(), "-map".into(), map];
+    args.extend(cover_codec_args(settings, is_png));
+    args.extend(["-frames:v".into(), "1".into(), "-update".into(), "1".into(), temp.to_string_lossy().into_owned()]);
+    let status = hidden_command(ffmpeg).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("Cannot extract the cover".into());
+    }
+    match publish_output(&temp, &destination) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => Err(format!("Cannot save {}: {e}", destination.display())),
+        _ => Ok(()),
+    }
+}
+
+/// Codec arguments for the cover stream: a copy, or re-encoded when it is resized or
+/// its format changes.
+fn cover_codec_args(settings: &ConverterSettings, cover_is_png: bool) -> Vec<String> {
+    let resize = settings.cover_resize.unwrap_or(false);
+    let target = match settings.cover_format.as_deref() {
+        Some("jpeg") => Some(false),
+        Some("png") => Some(true),
+        _ => None,
+    };
+    if !resize && target.is_none_or(|png| png == cover_is_png) {
+        return vec!["-c:v".into(), "copy".into()];
+    }
+    let png = target.unwrap_or(cover_is_png);
+    let mut args = Vec::new();
+    if resize {
+        let w = settings.cover_max_width.unwrap_or(400).max(16);
+        let h = settings.cover_max_height.unwrap_or(400).max(16);
+        // Only shrink; even sizes keep the JPEG encoder's chroma subsampling happy.
+        args.extend(["-vf".into(), format!("scale='min({w},iw)':'min({h},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2")]);
+    }
+    if png {
+        args.extend(["-c:v".into(), "png".into()]);
+    } else {
+        args.extend(["-c:v".into(), "mjpeg".into(), "-q:v".into(), "2".into(), "-pix_fmt".into(), "yuvj420p".into()]);
+    }
+    args
 }
 
 impl SourceInfo {
@@ -476,6 +579,7 @@ pub fn parse_ffmpeg_probe(stderr: &str) -> SourceInfo {
                 // JPEG and PNG are the only cover formats every target container accepts.
                 if matches!(codec, "mjpeg" | "png") {
                     info.cover_stream = stream_index(line);
+                    info.cover_is_png = codec == "png";
                 }
             }
             continue;
@@ -854,7 +958,12 @@ pub fn build_encode_args(
     gain_db: Option<f64>,
 ) -> Result<EncodePlan, String> {
     let keep = same_as_source(settings);
-    let mut args: Vec<String> = vec!["-y".into(), "-i".into(), input.to_string_lossy().into_owned(), "-map".into(), "0:a:0".into()];
+    let mut args: Vec<String> = vec!["-y".into(), "-i".into(), input.to_string_lossy().into_owned()];
+    let external = source.external_cover.as_ref().filter(|_| format.supports_cover() && source.cover_stream.is_none());
+    if let Some(cover) = external {
+        args.extend(["-i".into(), cover.to_string_lossy().into_owned()]);
+    }
+    args.extend(["-map".into(), "0:a:0".into()]);
 
     // Tags are always written explicitly from `tags` (source + edits): containers keep
     // them in different places (Ogg in the stream, MP3/FLAC/MP4 globally) and some
@@ -866,8 +975,15 @@ pub fn build_encode_args(
     }
 
     if format.supports_cover() {
+        let png = |p: &Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"));
         if let Some(index) = source.cover_stream {
-            args.extend(["-map".into(), format!("0:{index}"), "-c:v".into(), "copy".into(), "-disposition:v:0".into(), "attached_pic".into()]);
+            args.extend(["-map".into(), format!("0:{index}")]);
+            args.extend(cover_codec_args(settings, source.cover_is_png));
+            args.extend(["-disposition:v:0".into(), "attached_pic".into()]);
+        } else if let Some(cover) = external {
+            args.extend(["-map".into(), "1:v:0".into()]);
+            args.extend(cover_codec_args(settings, png(cover)));
+            args.extend(["-disposition:v:0".into(), "attached_pic".into()]);
         }
     }
 
@@ -1638,6 +1754,9 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
         source.range = Some((start, end));
         source.duration = (stop - start).max(0.0);
     }
+    if source.cover_stream.is_none() && request.settings.cover_external.unwrap_or(true) {
+        source.external_cover = folder_source.parent().and_then(find_external_cover);
+    }
     ctx.check()?;
 
     let work = TempDir(std::env::temp_dir().join(format!("audio-convert-{}", uuid::Uuid::new_v4().simple())));
@@ -1779,6 +1898,12 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
         // The output may later take the source's own name (after the source is trashed).
         if let Some(target) = &replaces {
             record_output(target, &input, range);
+        }
+        if settings.save_cover_file.unwrap_or(false) {
+            // Not fatal: the audio is saved.
+            if let Err(e) = save_folder_cover(&ffmpeg, &input, &source, settings, &dir, &work.0) {
+                log::warn!("{e}");
+            }
         }
         let name = destination.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         Ok(Converted { path: destination, name, skipped: false, replaces, gain_db })

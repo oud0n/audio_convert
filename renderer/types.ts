@@ -121,6 +121,12 @@ export interface ConverterSettings {
   keepFolderLevels?: number; // source folders recreated under the output folder (0 = none)
   keepFolderFrom?: 'last' | 'first'; // count them from the end or the start of the source path
   splitImages?: boolean; // split CUE sheets (and embedded sheets / chapters) into tracks
+  coverExternal?: boolean; // use cover.jpg / folder.jpg next to the source when none is embedded
+  coverResize?: boolean; // shrink covers larger than coverMaxWidth x coverMaxHeight
+  coverMaxWidth?: number;
+  coverMaxHeight?: number;
+  coverFormat?: 'keep' | 'jpeg' | 'png';
+  saveCoverFile?: boolean; // also save folder.jpg next to the output
   replayGain?: 'off' | 'track' | 'album'; // write ReplayGain 2.0 / R128 tags (EBU R128 measured)
   mergeOutput?: boolean; // join the whole batch into one output file
   mergeCreateCue?: boolean; // write a CUE sheet next to the merged file
