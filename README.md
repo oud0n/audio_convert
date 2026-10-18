@@ -16,7 +16,7 @@ Next.js と Electron (Nextron) で構築された、デスクトップ向けの�
   - アプリ終了時にタブの状態や変換設定が自動で `settings.json` に保存され、次回起動時に自動復元されます。
 * **多様なオーディオファイルデコード**:
   - 追加したファイルはパスとタグ情報だけを保持し、音声は変換時に FFmpeg が読み込みます。大量のファイルやフォルダを追加してもメモリを消費しません。
-  - 波形表示と再生用の音声は、選択中のファイルだけを FFmpeg でデコードします（48 kHz を超える音源は 44.1/48 kHz に下げて表示します）。ピーク・RMS も選択したときに計算します。
+  - 波形表示と再生用の音声は、選択中のファイルだけを FFmpeg でデコードします（48 kHz を超える音源は 44.1/48 kHz、20 分を超える音源はモノラル・低いサンプルレートに下げ、非常に長い音源は先頭だけを表示します）。ピーク・RMS は選択したときにこの表示用の音声から計算するため、長い音源では近似値です。
 * **オーディオ品質＆データ欠損検証 (Quality Audit & Lossless Verification)**:
   - 変換前後の音声データを数学的・音響学的に比較・検証する品質判定機能を搭載。
   - **100%完全一致検証 (Bit-exact PCM SHA-256 Checksum)**: 可逆圧縮（WAV ⇄ FLAC ⇄ ALAC）間などの変換において、PCMデータに1ビットの違いもないこと（SHA-256ハッシュ完全一致）を数学的に診断・表示します。
@@ -77,7 +77,7 @@ Featuring an intuitive multi-tab (multi-job) interface, you can organize and bat
   - Automatically saves active tab layouts and settings to `settings.json` upon exit for instant restoration on next launch.
 * **Versatile Audio Decoding & Fallback**:
   - Added files keep only their path and tags; FFmpeg reads the audio at conversion time, so large folders do not use up memory.
-  - Only the selected file is decoded (by FFmpeg) for the waveform and player; sources above 48 kHz are shown at 44.1/48 kHz. Peak and RMS are measured when a file is selected.
+  - Only the selected file is decoded (by FFmpeg) for the waveform and player; sources above 48 kHz are shown at 44.1/48 kHz, sources over 20 minutes in mono at a lower rate, and very long sources only from the start. Peak and RMS are measured from this preview when a file is selected, so they are approximate for long sources.
 * **Audio Quality & Data Loss Verification (Audit Engine)**:
   - Built-in mathematical and acoustic auditing to compare source vs converted audio.
   - **100% Bit-exact PCM SHA-256 Checksum**: Verifies bit-for-bit identity (zero loss) for lossless conversions (WAV ⇄ FLAC ⇄ ALAC).
@@ -131,7 +131,7 @@ npm run build
 - 保存はFFmpegで一元処理し、ブラウザの音声バッファは出力生成に使用しません。元ファイルをゴミ箱に移動した後は、波形と再生に保存された出力を使います。
 - ピーク正規化を有効にした場合はピーク目標値を優先し、手動音量変更は適用しません。無音トリムは先頭・末尾を対象とします。
 - 出力名のみNFC正規化し、Windows禁止文字・予約名・長すぎる名前を処理します。入力パスは変更しません。同名ファイルがある場合は、設定に応じて連番を付ける（`名前_2`、`名前_3`…）・上書きする・スキップするのいずれかを行います（既定は連番）。サンプルレートの変換には soxr（最高品質設定）を使います。FLAC は圧縮レベル 0〜8 のほか、非圧縮（全サブフレームが VERBATIM）でも書き出せます。
-- 完成した出力を同じ保存先の一時ファイルからハードリンクで確定します。FAT/exFAT等のハードリンク非対応の保存先では排他的に新規ファイルを作成し、コピー失敗時には削除します。「上書き」を選んだ場合のみ既存出力を置き換えます。元ファイル自身は上書きしません。
+- 完成した出力を同じ保存先の一時ファイルからハードリンクで確定します。FAT/exFAT等のハードリンク非対応の保存先では排他的に新規ファイルを作成し、コピー失敗時には削除します。「上書き」を選んだ場合のみ既存出力を置き換えます。元ファイル自身や、同じバッチで先に書き出した出力は上書きせず、連番を付けます。
 - PCM完全一致は、元の精度を保持したfloat64 PCMのSHA-256とサンプルレート・チャンネル数・PCMバイト数で判断します。これはコンテナやタグを含むファイル全体の一致ではありません。
 - 音声構成が異なる場合は完全一致とせず、波形比較は実行しません。ハッシュ・波形解析失敗は検証失敗として扱います。
 - 自動検証が有効な場合、検証失敗やwarning/degradedの出力では元ファイルをゴミ箱へ移しません。
@@ -140,4 +140,4 @@ npm run build
 - キャンセルは実行中のFFmpeg（正規化解析・変換・自動検証）を停止し、停止完了まで新しいバッチを開始しません。保存確定済みの出力は保持します。元ファイルのゴミ箱移動を既にOSへ依頼した場合、その操作は取り消せません。
 - 正規化解析と変換の進捗はFFmpegの処理時刻から表示します。バッチ終了通知は成功・失敗・要確認の件数を表示します。
 
-The native FFmpeg pipeline applies conversion settings, and preserves supported source precision; once the source is in the trash, the waveform and player use the saved output. Output names retain Unicode while sanitizing Windows restrictions. When the output name exists, the file gets a number (`name_2`, `name_3`, ...), replaces it, or is skipped, as set (default: number); the source file itself is never replaced. Sample rates are converted with soxr at its highest quality. FLAC can be written at levels 0-8 or uncompressed (every subframe VERBATIM). Publication uses hard links with an exclusive-copy fallback for FAT/exFAT. Exact PCM verification uses float64 PCM SHA-256 plus audio structure and decoded byte count. Failed analysis never passes verification. Optional source trashing is withheld when enabled automatic verification fails or reports warning/degraded.
+The native FFmpeg pipeline applies conversion settings, and preserves supported source precision; once the source is in the trash, the waveform and player use the saved output. Output names retain Unicode while sanitizing Windows restrictions. When the output name exists, the file gets a number (`name_2`, `name_3`, ...), replaces it, or is skipped, as set (default: number); the source file itself and outputs written earlier in the same batch are never replaced (they get a number). Sample rates are converted with soxr at its highest quality. FLAC can be written at levels 0-8 or uncompressed (every subframe VERBATIM). Publication uses hard links with an exclusive-copy fallback for FAT/exFAT. Exact PCM verification uses float64 PCM SHA-256 plus audio structure and decoded byte count. Failed analysis never passes verification. Optional source trashing is withheld when enabled automatic verification fails or reports warning/degraded.

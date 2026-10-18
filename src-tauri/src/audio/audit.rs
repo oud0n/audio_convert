@@ -88,6 +88,17 @@ pub fn decode_to_temp_wav(
     sample_rate: Option<u32>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    decode_to_temp_wav_with(file_path, sample_rate, 2, None, cancelled)
+}
+
+/// Like `decode_to_temp_wav`, with a channel count and an optional length limit (seconds).
+pub fn decode_to_temp_wav_with(
+    file_path: &str,
+    sample_rate: Option<u32>,
+    channels: u32,
+    max_seconds: Option<f64>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let tmp_dir = std::env::temp_dir();
     let temp_name = format!(
         "preview_{}_{}.wav",
@@ -100,9 +111,12 @@ pub fn decode_to_temp_wav(
 
     let ffmpeg = get_ffmpeg_executable();
     let mut cmd = crate::audio::convert::hidden_command(&ffmpeg);
-    cmd.args(["-y", "-i", file_path, "-map", "0:a:0", "-acodec", "pcm_s16le", "-ac", "2"]);
+    cmd.args(["-y", "-i", file_path, "-map", "0:a:0", "-acodec", "pcm_s16le", "-ac", &channels.to_string()]);
     if let Some(sr) = sample_rate {
         cmd.args(["-ar", &sr.to_string()]);
+    }
+    if let Some(t) = max_seconds {
+        cmd.args(["-t", &format!("{t:.3}")]);
     }
     cmd.args(["-map_metadata", "-1"]);
     cmd.arg(&output_path);

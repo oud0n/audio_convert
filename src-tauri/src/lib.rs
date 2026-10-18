@@ -32,6 +32,7 @@ pub fn run() {
             audio::convert::cancel_conversion_job,
             audio::convert::finish_conversion_job,
             audio::convert::decode_audio_to_wav,
+            audio::convert::cancel_preview,
             audio::audit::verify_audio_quality,
             system::settings::load_settings,
             system::settings::save_settings,

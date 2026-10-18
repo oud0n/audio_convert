@@ -376,6 +376,7 @@ fn request(input: &Path, out_dir: &Path, format: &str, file_name: &str) -> Conve
         job_id: None,
         settings: st,
         tags: None,
+        batch_id: None,
     }
 }
 
@@ -958,24 +959,77 @@ fn sources_without_decodable_audio_fail_and_publish_nothing() {
     let src = d.0.join("zero.wav");
     ffmpeg(&["-f", "lavfi", "-i", "sine=sample_rate=44100", "-frames:a", "0", "-c:a", "pcm_s24le", src.to_str().unwrap()]);
     let out = d.0.join("out");
-    for format in ["FLAC", "MP3", "WAV", "OGG", "OPUS"] {
+    for format in ["FLAC", "MP3", "WAV", "OGG", "OPUS", "M4A", "ALAC", "AIFF", "WAVPACK", "WMA", "AC3"] {
         let err = convert_blocking(&ctx(), &request(&src, &out, format, "z")).unwrap_err();
-        assert!(err.contains("No audio"), "{format}: {err}");
+        assert!(err.contains("No audio") || err.contains("empty file"), "{format}: {err}");
     }
     assert!(!out.exists() || fs::read_dir(&out).unwrap().next().is_none(), "nothing published");
-    // A 2 ms file is short but has audio.
+    // A 20 ms file is short (the probe reports under 0.05 s) but has audio.
     let tiny = d.0.join("tiny.wav");
-    ffmpeg(&["-f", "lavfi", "-i", "sine=sample_rate=48000", "-frames:a", "96", "-c:a", "pcm_s16le", tiny.to_str().unwrap()]);
-    convert_blocking(&ctx(), &request(&tiny, &out, "FLAC", "t")).unwrap();
+    ffmpeg(&["-f", "lavfi", "-i", "sine=sample_rate=48000", "-af", "atrim=end_sample=960", "-c:a", "pcm_s16le", tiny.to_str().unwrap()]);
+    assert!(probe_source(&get_ffmpeg_executable(), &tiny).unwrap().duration < 0.05);
+    for format in ["FLAC", "MP3", "WAV"] {
+        convert_blocking(&ctx(), &request(&tiny, &out, format, "t")).unwrap();
+    }
 }
 
 #[test]
-fn preview_rate_reduces_only_high_rates() {
-    assert_eq!(preview_rate(Some(44_100)), None);
-    assert_eq!(preview_rate(Some(48_000)), None);
-    assert_eq!(preview_rate(Some(88_200)), Some(44_100));
-    assert_eq!(preview_rate(Some(352_800)), Some(44_100));
-    assert_eq!(preview_rate(Some(96_000)), Some(48_000));
-    assert_eq!(preview_rate(Some(384_000)), Some(48_000));
-    assert_eq!(preview_rate(None), None);
+fn preview_plan_keeps_previews_small() {
+    // Short files: stereo, high rates reduced to 44.1/48 kHz.
+    assert_eq!(preview_plan(Some(44_100), 300.0), (None, 2, None));
+    assert_eq!(preview_plan(Some(352_800), 300.0), (Some(44_100), 2, None));
+    assert_eq!(preview_plan(Some(96_000), 300.0), (Some(48_000), 2, None));
+    // Longer files: mono, then a lower rate, then cut; always within the budget.
+    for (rate, secs) in [(44_100u32, 1500.0), (96_000, 3000.0), (44_100, 7200.0), (48_000, 36_000.0), (8_000, 90_000.0)] {
+        let (r, ch, limit) = preview_plan(Some(rate), secs);
+        let r = r.unwrap_or(rate);
+        let kept = limit.unwrap_or(secs).min(secs);
+        assert!(kept * f64::from(r) * f64::from(ch) <= PREVIEW_BUDGET * 1.001, "{rate} {secs}: {r} {ch} {limit:?}");
+        assert!(r >= 2_000 && r <= 48_000, "{r}");
+    }
+    assert_eq!(preview_plan(Some(44_100), 1500.0).1, 1);
+    assert!(preview_plan(Some(48_000), 36_000.0).2.is_some());
+}
+
+#[test]
+fn newer_preview_requests_supersede_older_ones() {
+    use std::sync::atomic::Ordering;
+    let base = LATEST_PREVIEW.load(Ordering::SeqCst) + 1_000;
+    cancel_preview(base);
+    assert!(!preview_superseded(base));
+    // A cancel or a newer request that arrives first still wins over an older id.
+    cancel_preview(base + 2);
+    assert!(preview_superseded(base + 1));
+    cancel_preview(base + 1);
+    assert!(!preview_superseded(base + 2));
+}
+
+#[test]
+fn overwrite_never_replaces_an_output_of_the_same_batch() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let a = d.0.join("a.wav");
+    let b = d.0.join("b.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=500:duration=0.2", "-c:a", "pcm_s16le", a.to_str().unwrap()]);
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=900:duration=0.2", "-c:a", "pcm_s16le", b.to_str().unwrap()]);
+    let out = d.0.join("out");
+    fs::create_dir_all(&out).unwrap();
+    fs::write(out.join("same.flac"), b"old").unwrap();
+    let batch = Some(format!("batch-{}", uuid::Uuid::new_v4().simple()));
+    let mut first = request(&a, &out, "FLAC", "same");
+    first.settings.on_existing = Some("overwrite".into());
+    first.batch_id = batch.clone();
+    let mut second = request(&b, &out, "FLAC", "same");
+    second.settings.on_existing = Some("overwrite".into());
+    second.batch_id = batch;
+    // The file that was there before is replaced; the batch's own output is not.
+    assert_eq!(convert_blocking(&ctx(), &first).unwrap().1, "same.flac");
+    assert_eq!(convert_blocking(&ctx(), &second).unwrap().1, "same_2.flac");
+    // A new batch may overwrite again.
+    let mut third = request(&b, &out, "FLAC", "same");
+    third.settings.on_existing = Some("overwrite".into());
+    third.batch_id = Some("another".into());
+    assert_eq!(convert_blocking(&ctx(), &third).unwrap().1, "same.flac");
 }

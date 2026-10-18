@@ -51,6 +51,31 @@ function sharedAudioContext(): AudioContext | null {
   return audioContextSingleton;
 }
 
+/**
+ * Decodes the backend's preview WAV at its own rate and channel count. An
+ * OfflineAudioContext does not resample to the output device's rate (e.g. 192 kHz),
+ * which would multiply the memory used.
+ */
+function decodePreviewWav(data: ArrayBuffer): Promise<AudioBuffer> {
+  const head = new DataView(data, 0, Math.min(data.byteLength, 44));
+  const valid = data.byteLength >= 44 && head.getUint32(0, false) === 0x52494646; // "RIFF"
+  const channels = valid ? head.getUint16(22, true) : 0;
+  const rate = valid ? head.getUint32(24, true) : 0;
+  const Offline = typeof window !== 'undefined'
+    ? (window.OfflineAudioContext || (window as any).webkitOfflineAudioContext)
+    : undefined;
+  if (Offline && channels >= 1 && channels <= 32 && rate >= 3000 && rate <= 768000) {
+    try {
+      return new Offline(channels, 1, rate).decodeAudioData(data);
+    } catch {
+      // fall back to the shared context below
+    }
+  }
+  const ctx = sharedAudioContext();
+  if (!ctx) return Promise.reject(new Error('Web Audio is not available'));
+  return ctx.decodeAudioData(data);
+}
+
 /** The file to decode for the waveform/player: the output once the source is in the trash. */
 function previewSourcePath(f: AudioFile): string {
   return f.originalDeleted && f.outputPath ? f.outputPath : f.path || '';
@@ -123,7 +148,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const activeConversionIdRef = useRef<string | null>(null);
   const activeConversionTabIdRef = useRef<string | null>(null);
   const jobRef = useRef<{ id: string; cancelled: boolean } | null>(null);
-  const batchRef = useRef({ success: 0, failed: 0, warnings: 0 });
+  const batchRef = useRef({ id: '', success: 0, failed: 0, warnings: 0 });
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   useEffect(() => {
@@ -249,18 +274,14 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       : prev);
     if (!keepId || !selectedPath || selectedHasBuffer || !AppBridge.isAvailable()) return;
     let stale = false;
+    const requestId = AppBridge.nextPreviewId();
     if (selectedRecord?.previewError) {
       setTabs(prev => prev.map(t => t.files.some(f => f.id === keepId)
         ? { ...t, files: t.files.map(f => f.id === keepId ? { ...f, previewError: undefined } : f) }
         : t));
     }
-    AppBridge.decodeAudioToWav(selectedPath)
-      .then((data) => {
-        if (stale) return null;
-        const ctx = sharedAudioContext();
-        if (!ctx) throw new Error('Web Audio is not available');
-        return ctx.decodeAudioData(data);
-      })
+    AppBridge.decodeAudioToWav(selectedPath, requestId)
+      .then((data) => (stale ? null : decodePreviewWav(data)))
       .then((buffer) => {
         if (stale || !buffer) return;
         const info = analyzeAudioBuffer(buffer);
@@ -275,7 +296,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           ? { ...t, files: t.files.map(f => f.id === keepId ? { ...f, previewError: message } : f) }
           : t));
       });
-    return () => { stale = true; };
+    return () => {
+      stale = true;
+      // Stop the backend decode too (a newer request would also stop it).
+      AppBridge.cancelPreview(AppBridge.nextPreviewId()).catch(() => {});
+    };
   }, [selectedFileId, selectedPath, selectedHasBuffer]);
 
   // Helper to add logs to specific tab
@@ -794,7 +819,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     }
 
     setIsConverting(true);
-    batchRef.current = { success: 0, failed: 0, warnings: 0 };
+    batchRef.current = { id: crypto.randomUUID(), success: 0, failed: 0, warnings: 0 };
     activeConversionTabIdRef.current = targetTabId;
     conversionQueueRef.current = queued.map((f) => f.id);
     
@@ -896,6 +921,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ファイルをディスクに書き込み中...` : `[${fileRecord.name}] Writing file to disk...`, 'info');
         const saveResult = await AppBridge.saveConvertedFile({
           jobId: job.id,
+          // "Overwrite" never replaces an output written earlier in the same batch.
+          batchId: batchRef.current.id || undefined,
           settings: tabSettings,
           inputFilePath: fileRecord.path,
           fileName: finalExportName,

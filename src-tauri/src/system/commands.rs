@@ -50,70 +50,92 @@ pub struct DroppedFile {
     pub size: u64,
 }
 
+pub const MAX_DROPPED_FILES: usize = 10_000;
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct DroppedPaths {
+    pub files: Vec<DroppedFile>,
+    /// More files were found than `MAX_DROPPED_FILES`; the rest were left out.
+    pub truncated: bool,
+}
+
 /// Expands dropped paths: files are kept if their extension is in `extensions`,
 /// folders are searched recursively (hidden entries and symlinked folders are skipped).
-/// Files in a folder come in name order; at most 10000 files are returned.
-pub fn expand_paths_blocking(paths: &[PathBuf], extensions: &[String]) -> Vec<DroppedFile> {
-    const MAX_FILES: usize = 10_000;
+/// Files in a folder come in name order; a file reached twice (a folder and a file in
+/// it, or the same folder twice) is listed once; at most `MAX_DROPPED_FILES` are returned.
+pub fn expand_paths_blocking(paths: &[PathBuf], extensions: &[String]) -> DroppedPaths {
     const MAX_DEPTH: usize = 32;
-    let wanted = |p: &Path| {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
-    };
-    fn walk(dir: &Path, depth: usize, wanted: &dyn Fn(&Path) -> bool, out: &mut Vec<DroppedFile>) {
-        if depth > MAX_DEPTH || out.len() >= MAX_FILES {
-            return;
+    struct Walk<'a> {
+        extensions: &'a [String],
+        seen: std::collections::HashSet<PathBuf>,
+        out: Vec<DroppedFile>,
+        truncated: bool,
+    }
+    impl Walk<'_> {
+        fn wanted(&self, p: &Path) -> bool {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| self.extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
         }
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
-        entries.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
-        for entry in entries {
-            if out.len() >= MAX_FILES {
+        fn push(&mut self, path: &Path) {
+            let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            if self.seen.contains(&key) {
                 return;
             }
-            if entry.file_name().to_string_lossy().starts_with('.') {
-                continue;
+            if self.out.len() >= MAX_DROPPED_FILES {
+                self.truncated = true;
+                return;
             }
-            let Ok(kind) = entry.file_type() else { continue };
-            let path = entry.path();
-            if kind.is_dir() {
-                walk(&path, depth + 1, wanted, out);
-            } else if (kind.is_file() || kind.is_symlink()) && path.is_file() && wanted(&path) {
-                push(&path, out);
+            self.seen.insert(key);
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.out.push(DroppedFile { path: path.to_string_lossy().into_owned(), name, size });
+        }
+        fn walk(&mut self, dir: &Path, depth: usize) {
+            if depth > MAX_DEPTH || self.truncated {
+                return;
+            }
+            let Ok(entries) = std::fs::read_dir(dir) else { return };
+            let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+            entries.sort_by_key(|e| e.file_name().to_string_lossy().to_lowercase());
+            for entry in entries {
+                if self.truncated {
+                    return;
+                }
+                if entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let Ok(kind) = entry.file_type() else { continue };
+                let path = entry.path();
+                if kind.is_dir() {
+                    self.walk(&path, depth + 1);
+                } else if (kind.is_file() || kind.is_symlink()) && path.is_file() && self.wanted(&path) {
+                    self.push(&path);
+                }
             }
         }
     }
-    fn push(path: &Path, out: &mut Vec<DroppedFile>) {
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        out.push(DroppedFile { path: path.to_string_lossy().into_owned(), name, size });
-    }
-    let mut out = Vec::new();
+    let mut w = Walk { extensions, seen: Default::default(), out: Vec::new(), truncated: false };
     for p in paths {
-        if out.len() >= MAX_FILES {
+        if w.truncated {
             break;
         }
         // A dropped folder itself may be a link; only its contents are not followed further.
         if p.is_dir() {
-            walk(p, 0, &wanted, &mut out);
-        } else if p.is_file() && wanted(p) {
-            push(p, &mut out);
+            w.walk(p, 0);
+        } else if p.is_file() && w.wanted(p) {
+            w.push(p);
         }
     }
-    // A folder and a file inside it (or the same folder twice) can be dropped together;
-    // keep only the first copy of each file.
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|f| seen.insert(std::fs::canonicalize(&f.path).unwrap_or_else(|_| PathBuf::from(&f.path))));
-    out
+    DroppedPaths { files: w.out, truncated: w.truncated }
 }
 
 #[tauri::command]
-pub async fn expand_dropped_paths(paths: Vec<String>, extensions: Vec<String>) -> Vec<DroppedFile> {
+pub async fn expand_dropped_paths(paths: Vec<String>, extensions: Vec<String>) -> DroppedPaths {
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
     tauri::async_runtime::spawn_blocking(move || expand_paths_blocking(&paths, &extensions))
         .await
-        .unwrap_or_default()
+        .unwrap_or(DroppedPaths { files: Vec::new(), truncated: false })
 }
 
 #[cfg(test)]
@@ -135,6 +157,8 @@ mod tests {
             &[album.clone(), root.join("single.mp3"), album.join("02.flac"), root.join("missing.flac"), album.clone()],
             &exts,
         );
+        assert!(!got.truncated);
+        let got = got.files;
         let names: Vec<_> = got.iter().map(|f| f.path.strip_prefix(root.to_str().unwrap()).unwrap().replace('\\', "/")).collect();
         assert_eq!(names, ["/Album/01.FLAC", "/Album/02.flac", "/Album/CD2/01.wav", "/single.mp3"]);
         assert_eq!(got[3].size, 3);

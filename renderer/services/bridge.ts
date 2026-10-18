@@ -75,6 +75,15 @@ export function isElectron(): boolean {
   return !!getIpc();
 }
 
+let previewSeq = 0;
+
+/** GTK (Linux) matches filter patterns case-sensitively; other systems ignore case. */
+function pickerExtensions(extensions: string[]): string[] {
+  const linux = typeof navigator !== 'undefined' && /Linux/i.test(navigator.userAgent) && !/Android/i.test(navigator.userAgent);
+  if (!linux) return extensions;
+  return extensions.map(e => [...e].map(c => /[a-z]/i.test(c) ? `[${c.toLowerCase()}${c.toUpperCase()}]` : c).join(''));
+}
+
 export class AppBridge {
   static isAvailable(): boolean {
     return isTauri() || isElectron();
@@ -109,8 +118,7 @@ export class AppBridge {
     const { open } = await import('@tauri-apps/plugin-dialog');
     const selected = await open(folders
       ? { directory: true, multiple: true }
-      // GTK matches the patterns case-sensitively, so list upper-case extensions too.
-      : { multiple: true, filters: [{ name: 'Audio', extensions: [...extensions, ...extensions.map(e => e.toUpperCase())] }] });
+      : { multiple: true, filters: [{ name: 'Audio', extensions: pickerExtensions(extensions) }] });
     if (!selected) return [];
     return Array.isArray(selected) ? selected : [selected];
   }
@@ -168,19 +176,35 @@ export class AppBridge {
   }
 
   /** Expands dropped paths (folders recursively) to the files with one of `extensions`. */
-  static async expandDroppedPaths(paths: string[], extensions: string[]): Promise<DroppedFile[]> {
+  /** `truncated`: more files than the backend's limit (10000) were found. */
+  static async expandDroppedPaths(paths: string[], extensions: string[]): Promise<{ files: DroppedFile[]; truncated: boolean }> {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core');
-      return await invoke<DroppedFile[]>('expand_dropped_paths', { paths, extensions });
+      return await invoke<{ files: DroppedFile[]; truncated: boolean }>('expand_dropped_paths', { paths, extensions });
     }
-    return [];
+    return { files: [], truncated: false };
   }
 
-  static async decodeAudioToWav(filePath: string): Promise<ArrayBuffer> {
+  /** A new preview request id; ids only grow (also across page reloads). */
+  static nextPreviewId(): number {
+    previewSeq = (previewSeq + 1) % 1000;
+    return Date.now() * 1000 + previewSeq;
+  }
+
+  /** Stops preview decodes started before `requestId` was made. */
+  static async cancelPreview(requestId: number): Promise<void> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('cancel_preview', { requestId });
+    }
+  }
+
+  /** Decodes a file for the waveform/player; a newer request or cancel stops it. */
+  static async decodeAudioToWav(filePath: string, requestId?: number): Promise<ArrayBuffer> {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core');
       // The backend answers with raw bytes (an ArrayBuffer).
-      const data = await invoke<ArrayBuffer | number[] | Uint8Array>('decode_audio_to_wav', { filePath });
+      const data = await invoke<ArrayBuffer | number[] | Uint8Array>('decode_audio_to_wav', { filePath, requestId });
       if (data instanceof ArrayBuffer) return data;
       if (data instanceof Uint8Array) {
         return (data.buffer as ArrayBuffer).slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;

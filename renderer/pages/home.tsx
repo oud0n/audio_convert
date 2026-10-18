@@ -517,18 +517,20 @@ export default function HomeDashboardPage() {
   const addPaths = (paths: string[]) => {
     if (paths.length === 0) return;
     AppBridge.expandDroppedPaths(paths, SUPPORTED_INPUT_EXTENSIONS)
-      .then((found) => {
+      .then(async ({ files: found, truncated }) => {
         if (found.length === 0) {
           showToast('info', lang === 'ja' ? '対応している音声ファイルが見つかりませんでした。' : 'No supported audio files were found.');
           return;
         }
-        // The backend stops at 10000 files per drop or pick.
-        if (found.length >= 10000) {
-          showToast('error', lang === 'ja'
-            ? '一度に追加できるのは 10000 ファイルまでです。残りは追加されていません。'
-            : 'Up to 10000 files can be added at once; the rest were not added.');
+        await handleAddFiles(found.map(f => pathOnlyFile(f.path, f.name, f.size)));
+        // Shown after the add finished, so the "added" message does not replace it.
+        if (truncated) {
+          const message = lang === 'ja'
+            ? `一度に追加できるのは ${found.length} ファイルまでです。残りは追加されていません。`
+            : `Up to ${found.length} files can be added at once; the rest were not added.`;
+          addLog(message, 'error');
+          showToast('error', message);
         }
-        handleAddFiles(found.map(f => pathOnlyFile(f.path, f.name, f.size)));
       })
       .catch((err) => console.warn('Cannot read dropped paths:', err));
   };
