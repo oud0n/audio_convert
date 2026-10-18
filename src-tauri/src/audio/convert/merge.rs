@@ -139,6 +139,18 @@ fn verify_parts(ctx: &JobCtx, request: &MergeRequest, sources: &[(PathBuf, Sourc
     Ok((true, format!("All {} parts are bit-exact with their sources", sources.len())))
 }
 
+/// Fills `buf` as far as the stream allows; returns the bytes read (short only at the end).
+fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    Ok(filled)
+}
+
 /// Samples per channel `path` decodes to through `filters`.
 fn count_samples(ffmpeg: &Path, path: &Path, filters: &str) -> Result<u64, String> {
     let mut child = hidden_command(ffmpeg)
@@ -185,10 +197,6 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
     let work = TempDir(std::env::temp_dir().join(format!("audio-convert-join-{}", uuid::Uuid::new_v4().simple())));
     fs::create_dir_all(&work.0).map_err(|e| e.to_string())?;
     let joined = work.0.join(format!("joined.{ext}"));
-    let mut args: Vec<String> = vec!["-y".into()];
-    for (path, _) in &sources {
-        args.extend(["-i".into(), path.to_string_lossy().into_owned()]);
-    }
     // Each input's filters (cut, relabel, resample), and its exact length in samples
     // after them: shorter inputs are padded to the longest, sample for sample.
     let mut chains = Vec::new();
@@ -214,29 +222,105 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
         lengths.push(count_samples(&ffmpeg, path, &f.join(","))?);
     }
     let longest_samples = lengths.iter().copied().max().unwrap_or(0);
-    // `join` places each input channel at a named output channel: a pure mapping (amerge
-    // would give 3 or 4 channels a default layout and then remix them).
-    let targets = layout_channel_names(&layout_name(total), total);
-    let mut map = Vec::new();
-    let mut graph = String::new();
-    for (n, ((_, info), f)) in sources.iter().zip(&chains).enumerate() {
-        graph.push_str(&format!("[{n}:a:0]{},apad=whole_len={longest_samples}[a{n}];", f.join(",")));
-        for c in 0..info.channels.unwrap_or(1).max(1) {
-            map.push(format!("{n}.{c}-{}", targets[map.len()]));
+    // Each input is decoded on its own and the channels are put side by side here, in
+    // input order (FFmpeg's join filter dropped the last frames under load). The result
+    // is only relabelled with the standard layout for the count, never remixed.
+    let (raw, size) = match sample_fmt {
+        "s16" => ("s16le", 2usize),
+        "flt" => ("f32le", 4),
+        _ => ("s32le", 4),
+    };
+    let mut writer_args: Vec<String> = vec![
+        "-nostdin".into(), "-hide_banner".into(), "-loglevel".into(), "error".into(), "-y".into(),
+        "-f".into(), raw.into(), "-ar".into(), rate.to_string(), "-ch_layout".into(), layout_name(total), "-i".into(), "pipe:0".into(),
+        "-c:a".into(), codec.into(),
+    ];
+    if codec == "flac" {
+        writer_args.extend(["-compression_level".into(), "0".into(), "-frame_size".into(), "4096".into(), "-bits_per_raw_sample".into(), (if bits > 16 { 24 } else { 16 }).to_string()]);
+    } else {
+        writer_args.extend(["-rf64".into(), "auto".into()]);
+    }
+    writer_args.push(joined.to_string_lossy().into_owned());
+    let mut writer = hidden_command(&ffmpeg)
+        .args(&writer_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start FFmpeg: {e}"))?;
+    let mut sink = writer.stdin.take().ok_or("Failed to open FFmpeg's input")?;
+    let mut readers = Vec::new();
+    for ((path, _), f) in sources.iter().zip(&chains) {
+        let spawned = hidden_command(&ffmpeg)
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
+            .arg(path)
+            .args(["-map", "0:a:0", "-af", &f.join(","), "-f", raw, "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(child) => readers.push(child),
+            Err(e) => {
+                for r in readers.iter_mut() {
+                    let _ = r.kill();
+                    let _ = r.wait();
+                }
+                let _ = writer.kill();
+                let _ = writer.wait();
+                return Err(format!("Failed to start FFmpeg: {e}"));
+            }
         }
     }
-    for n in 0..sources.len() {
-        graph.push_str(&format!("[a{n}]"));
+    let widths: Vec<usize> = sources.iter().map(|(_, s)| s.channels.unwrap_or(1).max(1) as usize).collect();
+    let result = (|| -> Result<(), String> {
+        const FRAMES: usize = 4096;
+        let mut outs: Vec<_> = readers.iter_mut().map(|r| r.stdout.take()).collect();
+        let mut bufs: Vec<Vec<u8>> = widths.iter().map(|w| vec![0u8; FRAMES * w * size]).collect();
+        let frame_out = total as usize * size;
+        let mut block = vec![0u8; FRAMES * frame_out];
+        let mut done: u64 = 0;
+        while done < longest_samples {
+            ctx.check()?;
+            let n = ((longest_samples - done) as usize).min(FRAMES);
+            for ((out, buf), w) in outs.iter_mut().zip(bufs.iter_mut()).zip(&widths) {
+                let want = n * w * size;
+                let got = match out.as_mut() {
+                    Some(o) => read_full(o, &mut buf[..want]).map_err(|e| e.to_string())?,
+                    None => 0,
+                };
+                // Past an input's end: silence (zero is silence in every raw format here).
+                buf[got..want].fill(0);
+            }
+            let mut at = 0;
+            for f in 0..n {
+                for (buf, w) in bufs.iter().zip(&widths) {
+                    let bytes = w * size;
+                    block[at..at + bytes].copy_from_slice(&buf[f * bytes..(f + 1) * bytes]);
+                    at += bytes;
+                }
+            }
+            sink.write_all(&block[..n * frame_out]).map_err(|e| format!("Cannot write the joined audio: {e}"))?;
+            done += n as u64;
+            if longest > 0.0 {
+                ctx.emit("decoding", (done as f64 / longest_samples.max(1) as f64 * 100.0).min(99.0));
+            }
+        }
+        Ok(())
+    })();
+    drop(sink);
+    for r in readers.iter_mut() {
+        let _ = r.kill();
+        let _ = r.wait();
     }
-    graph.push_str(&format!("join=inputs={}:channel_layout={}:map={}[out]", sources.len(), layout_name(total), map.join("|")));
-    args.extend(["-filter_complex".into(), graph, "-map".into(), "[out]".into(), "-c:a".into(), codec.into()]);
-    if codec == "flac" {
-        args.extend(["-compression_level".into(), "0".into(), "-frame_size".into(), "4096".into(), "-bits_per_raw_sample".into(), (if bits > 16 { 24 } else { 16 }).to_string()]);
-    } else {
-        args.extend(["-rf64".into(), "auto".into()]);
+    if result.is_err() {
+        let _ = writer.kill();
     }
-    args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into(), joined.to_string_lossy().into_owned()]);
-    run_ffmpeg(ctx, &ffmpeg, &args, longest, "decoding")?;
+    let output = writer.wait_with_output().map_err(|e| e.to_string())?;
+    result?;
+    if !output.status.success() {
+        return Err(format!("Cannot write the joined audio: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
     ctx.check()?;
 
     // The joined channels are the point: an explicit channel setting does not apply.
