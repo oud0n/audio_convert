@@ -207,8 +207,10 @@ export default function HomeDashboardPage() {
       ctx.stroke();
     }
 
-    // Long files are previewed only from the start (see the README); say so.
-    if (selectedFile.duration && buffer.duration + 1 < selectedFile.duration) {
+    // Long files are previewed only from the start: the backend then cuts the preview at
+    // exactly 20 min x 48 kHz x 2 ch worth of samples (see preview_plan); say so.
+    const cutAt = (48000 * 2 * 1200) / (buffer.sampleRate * buffer.numberOfChannels);
+    if (Math.abs(buffer.duration - cutAt) < 0.5) {
       const mins = Math.floor(buffer.duration / 60);
       const secs = Math.floor(buffer.duration % 60).toString().padStart(2, '0');
       ctx.font = '10px "JetBrains Mono", monospace';

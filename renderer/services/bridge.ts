@@ -187,6 +187,15 @@ export class AppBridge {
     return { files: [], truncated: false };
   }
 
+  /** Tells the converter which sources a starting batch will read, so "overwrite"
+   * never replaces one of them before its turn. */
+  static async setQueuedSources(paths: string[]): Promise<void> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('set_queued_sources', { paths });
+    }
+  }
+
   /** A new preview request id (unique for this page; used only to cancel that request). */
   static nextPreviewId(): number {
     previewSeq += 1;

@@ -1047,6 +1047,27 @@ fn outputs_of_other_sources_are_never_overwritten_or_skipped() {
 }
 
 #[test]
+fn overwrite_never_replaces_a_queued_source() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let x_flac = d.0.join("x.flac");
+    let x_wav = d.0.join("x.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=500:duration=0.2", "-c:a", "flac", x_flac.to_str().unwrap()]);
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=900:duration=0.2", "-c:a", "pcm_s16le", x_wav.to_str().unwrap()]);
+    let wav_audio = compute_pcm_fingerprint(x_wav.to_str().unwrap()).unwrap().0;
+    set_queued_sources(vec![x_flac.to_string_lossy().into_owned(), x_wav.to_string_lossy().into_owned()]);
+    let mut r = request(&x_flac, &d.0, "WAV", "x");
+    r.settings.on_existing = Some("overwrite".into());
+    r.settings.save_in_source_folder = Some(true);
+    let done = convert_blocking_ex(&ctx(), &r).unwrap();
+    set_queued_sources(Vec::new());
+    assert_eq!(done.name, "x_2.wav");
+    assert_eq!(compute_pcm_fingerprint(x_wav.to_str().unwrap()).unwrap().0, wav_audio, "the queued source is untouched");
+}
+
+#[test]
 fn an_output_moved_into_its_source_name_is_protected() {
     if !ffmpeg_available() {
         return;

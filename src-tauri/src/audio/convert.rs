@@ -96,17 +96,29 @@ pub struct ConvertRequest {
 /// a retry or a later batch never replaces another file's only copy.
 static SESSION_OUTPUTS: Mutex<Option<HashMap<PathBuf, PathBuf>>> = Mutex::new(None);
 
+/// Sources still waiting in the current batch: no other conversion may replace them.
+static QUEUED_SOURCES: Mutex<Option<std::collections::HashSet<PathBuf>>> = Mutex::new(None);
+
 fn output_key(path: &Path) -> Option<PathBuf> {
-    fs::canonicalize(path).ok().map(|p| {
-        // Linux case-insensitive mounts keep the given case; compare without it there too.
-        if cfg!(target_os = "linux") { PathBuf::from(p.to_string_lossy().to_lowercase()) } else { p }
-    })
+    fs::canonicalize(path).ok().map(simplify_verbatim_path)
 }
 
+/// True when `path` is another source's output from this session, or another source
+/// that is still queued: "overwrite" and "skip" must leave such a file alone.
 fn written_from_other_source(path: &Path, input: &Path) -> bool {
     let Some(key) = output_key(path) else { return false };
+    if key != input && QUEUED_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|q| q.contains(&key)) {
+        return true;
+    }
     let guard = SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
     guard.as_ref().and_then(|m| m.get(&key)).is_some_and(|src| src != input)
+}
+
+/// Registers the sources of a batch that is starting (replaces the previous batch's).
+#[tauri::command]
+pub fn set_queued_sources(paths: Vec<String>) {
+    let set = paths.iter().filter_map(|p| output_key(Path::new(p))).collect();
+    *QUEUED_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(set);
 }
 
 fn record_output(path: &Path, input: &Path) {

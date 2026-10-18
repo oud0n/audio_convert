@@ -806,7 +806,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
 
 
 
-  const handleStartConversion = () => {
+  const handleStartConversion = async () => {
     if (activeConversionTabIdRef.current) return;
     const targetTabId = activeTabId;
     const currentTab = tabs.find(t => t.id === targetTabId);
@@ -822,6 +822,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     batchRef.current = { success: 0, failed: 0, warnings: 0 };
     activeConversionTabIdRef.current = targetTabId;
     conversionQueueRef.current = queued.map((f) => f.id);
+    // Protect every queued source from "overwrite" before the first file starts.
+    await AppBridge.setQueuedSources(queued.map((f) => f.path || "").filter(Boolean)).catch(() => {});
     
     addLogToTab(targetTabId, lang === 'ja' ? `${queued.length}個のファイルのバッチ処理を開始します...` : `Starting batch pipeline for ${queued.length} items...`, 'info');
     processNextInQueue();
