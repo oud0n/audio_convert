@@ -10,7 +10,7 @@ import {
   Sliders, Volume2, Cpu, Bell, ShieldCheck, Zap, Laptop, 
   Folder, Plus, Trash, FileText, Sparkles 
 } from '../components/Icons';
-import { ConverterSettings, SettingsPreset, getFormatExtension } from '../types';
+import { ConverterSettings, SettingsPreset, getFormatExtension, VBR_FORMATS } from '../types';
 import { renderFileName, LOSSLESS_OUTPUT_FORMATS } from '../utils/fileNamePattern';
 
 export default function SettingsPage() {
@@ -411,6 +411,27 @@ export default function SettingsPage() {
                   </div>
                 ) : (
                   <div className="space-y-1.5">
+                    {VBR_FORMATS.includes((settings.outputFormat || '').toUpperCase()) && (
+                      <div className="flex gap-2">
+                        <select
+                          value={settings.bitrateMode ?? 'cbr'}
+                          onChange={(e) => updateSetting('bitrateMode', e.target.value as any)}
+                          className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
+                        >
+                          <option value="vbr">VBR (quality)</option>
+                          <option value="cbr">CBR (bitrate)</option>
+                        </select>
+                        {settings.bitrateMode === 'vbr' && (
+                          <select
+                            value={settings.vbrQuality ?? 2}
+                            onChange={(e) => updateSetting('vbrQuality', Number(e.target.value) as any)}
+                            className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
+                          >
+                            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((q) => <option key={q} value={q}>V{q}</option>)}
+                          </select>
+                        )}
+                      </div>
+                    )}
                     <label className="text-xs text-zinc-400 font-mono">COMPRESSION BITRATE</label>
                     <select
                       value={settings.bitrate}

@@ -66,6 +66,12 @@ pub struct ConverterSettings {
     pub keep_folder_levels: Option<u32>,
     #[serde(rename = "keepFolderFrom")]
     pub keep_folder_from: Option<String>,
+    /// "vbr" encodes MP3 / AAC / Vorbis by quality instead of bitrate (None / "cbr" = bitrate).
+    #[serde(rename = "bitrateMode")]
+    pub bitrate_mode: Option<String>,
+    /// VBR quality on LAME's scale: 0 (best, V0) to 9 (smallest, V9). Default 2 (V2).
+    #[serde(rename = "vbrQuality")]
+    pub vbr_quality: Option<f64>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -591,6 +597,10 @@ fn lossy_rates(format: OutFormat) -> Option<&'static [u32]> {
 /// highest accepted rate below it, preferring whole-number ratios (88.2k -> 44.1k).
 pub fn pick_rate(format: OutFormat, wanted: u32) -> u32 {
     let Some(rates) = lossy_rates(format) else { return wanted };
+    pick_from(rates, wanted)
+}
+
+fn pick_from(rates: &[u32], wanted: u32) -> u32 {
     if rates.contains(&wanted) {
         return wanted;
     }
@@ -675,7 +685,11 @@ pub fn target_shape(format: OutFormat, settings: &ConverterSettings, source: &So
     if format.is_lossless() {
         return (rate, channels);
     }
-    (rate.map(|r| pick_rate(format, r)), channels.map(|c| c.min(max_channels(format))))
+    let rate = rate.map(|r| pick_rate(format, r));
+    // AudioToolbox AAC (used for VBR) encodes up to 48 kHz.
+    let aac_at = format == OutFormat::M4a && vbr_args(format, settings, true).is_some() && aac_at_available();
+    let rate = if aac_at { rate.map(|r| pick_from(&[8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000], r)) } else { rate };
+    (rate, channels.map(|c| c.min(max_channels(format))))
 }
 
 /// Filters applied before any gain: silence trimming (explicit mode only), then the
@@ -717,6 +731,39 @@ pub fn pre_gain_filters(format: OutFormat, settings: &ConverterSettings, source:
 }
 
 /// True when the FFmpeg in use has the SoX resampler (the bundled build does).
+/// AudioToolbox's AAC encoder (macOS builds): its true VBR is the encoder qaac uses.
+fn aac_at_available() -> bool {
+    static AAC_AT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AAC_AT.get_or_init(|| {
+        hidden_command(&get_ffmpeg_executable())
+            .args(["-hide_banner", "-encoders"])
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().any(|w| w == "aac_at"))
+    })
+}
+
+/// VBR settings when the bitrate mode is "vbr": (encoder, quality arguments). The
+/// quality is LAME's V scale (0 best .. 9); other encoders get the closest equivalent.
+pub fn vbr_args(format: OutFormat, settings: &ConverterSettings, aac_at: bool) -> Option<(&'static str, Vec<String>)> {
+    if settings.bitrate_mode.as_deref() != Some("vbr") {
+        return None;
+    }
+    let v = settings.vbr_quality.unwrap_or(2.0).clamp(0.0, 9.0);
+    match format {
+        OutFormat::Mp3 => Some(("libmp3lame", vec!["-q:a".into(), format!("{v:.1}")])),
+        // AudioToolbox quality 0..14 maps to TVBR 127..1 (127 - 9q): V2 -> q4 = TVBR 91,
+        // qaac's default.
+        OutFormat::M4a if aac_at => {
+            Some(("aac_at", vec!["-aac_at_mode".into(), "vbr".into(), "-q:a".into(), format!("{}", (v * 2.0).round().min(14.0) as u32)]))
+        }
+        // FFmpeg's own AAC encoder: quality 2.0 (best) .. 0.3.
+        OutFormat::M4a => Some(("aac", vec!["-q:a".into(), format!("{:.2}", 2.0 - v * 0.19)])),
+        // Vorbis quality 10 (best) .. 1.
+        OutFormat::Ogg => Some(("libvorbis", vec!["-q:a".into(), format!("{:.1}", 10.0 - v)])),
+        _ => None,
+    }
+}
+
 fn soxr_available() -> bool {
     static SOXR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SOXR.get_or_init(|| {
@@ -824,6 +871,8 @@ pub fn build_encode_args(
         OutFormat::Ac3 => "ac3",
         OutFormat::Wma => "wmav2",
     };
+    let vbr = vbr_args(format, settings, format == OutFormat::M4a && aac_at_available());
+    let codec = vbr.as_ref().map_or(codec, |(c, _)| *c);
     let threads = settings.thread_pool_size.unwrap_or(1).clamp(1, 16);
     args.extend(["-c:a".into(), codec.into(), "-threads".into(), threads.to_string()]);
 
@@ -846,7 +895,9 @@ pub fn build_encode_args(
         }
     }
 
-    if !format.is_lossless() {
+    if let Some((_, quality)) = vbr {
+        args.extend(quality);
+    } else if !format.is_lossless() {
         let kbps: u32 = settings.bitrate.as_deref().unwrap_or("192").trim().parse().unwrap_or(192).clamp(8, 640);
         let ch = channels.unwrap_or(2).max(1);
         match format {

@@ -12,7 +12,7 @@ import {
   ShieldCheck
 } from '../components/Icons';
 import { estimateOutputSize } from '../utils/audioEncoder';
-import { MetadataTags, getFormatExtension } from '../types';
+import { MetadataTags, getFormatExtension, VBR_FORMATS } from '../types';
 import { t } from '../utils/i18n';
 import { AppBridge, isTauri, pathOnlyFile } from '../services/bridge';
 import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS } from '../utils/fileNamePattern';
@@ -1560,7 +1560,9 @@ export default function HomeDashboardPage() {
                 <span className="text-zinc-500 font-mono text-[10px]">
                   {LOSSLESS_OUTPUT_FORMATS.includes((settings.outputFormat || '').toUpperCase())
                     ? (settings.sameAsSource ? 'Lossless (Same as Source)' : `${settings.bitDepth}-bit Lossless`)
-                    : `${settings.bitrate} kbps`
+                    : settings.bitrateMode === 'vbr' && VBR_FORMATS.includes((settings.outputFormat || '').toUpperCase())
+                      ? `VBR V${settings.vbrQuality ?? 2}`
+                      : `${settings.bitrate} kbps`
                   }
                 </span>
               </div>
@@ -1830,6 +1832,36 @@ export default function HomeDashboardPage() {
                   </div>
                 ) : (
                   <div className="space-y-1.5">
+                    {VBR_FORMATS.includes((settings.outputFormat || '').toUpperCase()) && (
+                      <div className="flex items-center gap-1.5 text-[10px] font-mono text-zinc-500">
+                        {(['vbr', 'cbr'] as const).map((mode) => (
+                          <button
+                            key={mode}
+                            onClick={() => updateSetting('bitrateMode', mode)}
+                            className={`px-2 py-0.5 rounded border cursor-pointer ${
+                              (settings.bitrateMode ?? 'cbr') === mode
+                                ? 'bg-emerald-600/10 text-emerald-400 border-emerald-500/40 font-bold'
+                                : 'bg-zinc-950 text-zinc-450 border-zinc-850 hover:bg-zinc-800'
+                            }`}
+                          >
+                            {mode === 'vbr' ? t(lang, 'vbrMode') : t(lang, 'cbrMode')}
+                          </button>
+                        ))}
+                        {settings.bitrateMode === 'vbr' && (
+                          <select
+                            value={settings.vbrQuality ?? 2}
+                            onChange={(e) => updateSetting('vbrQuality', Number(e.target.value))}
+                            className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-zinc-300"
+                            title={t(lang, 'vbrQualityHelp')}
+                          >
+                            {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((q) => (
+                              <option key={q} value={q}>V{q}{q === 0 ? ` (${t(lang, 'vbrBest')})` : q === 2 ? ` (${t(lang, 'vbrDefault')})` : ''}</option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+                    )}
+                    {!(settings.bitrateMode === 'vbr' && VBR_FORMATS.includes((settings.outputFormat || '').toUpperCase())) && (<>
                     <label className="text-zinc-450 text-[10px] font-mono text-zinc-550 block">{t(lang, 'bitrate')}</label>
                     <div className="grid grid-cols-4 gap-1.5">
                       {['128', '192', '256', '320'].map((rate) => (
@@ -1846,6 +1878,7 @@ export default function HomeDashboardPage() {
                         </button>
                       ))}
                     </div>
+                    </>)}
                   </div>
                 )}
 

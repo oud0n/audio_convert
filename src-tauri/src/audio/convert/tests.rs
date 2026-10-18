@@ -23,6 +23,8 @@ fn settings(keep: bool) -> ConverterSettings {
         on_existing: None,
         keep_folder_levels: None,
         keep_folder_from: None,
+        bitrate_mode: None,
+        vbr_quality: None,
     }
 }
 
@@ -488,6 +490,44 @@ fn hi_res_source_to_mp3_and_opus_succeeds() {
     let src = make_source(&d.0);
     for format in ["MP3", "OPUS", "M4A"] {
         convert_blocking(&ctx(), &request(&src, &d.0.join("out"), format, "x")).unwrap_or_else(|e| panic!("{format}: {e}"));
+    }
+}
+
+#[test]
+fn vbr_maps_lame_quality_to_each_encoder() {
+    let mut st = settings(true);
+    assert!(vbr_args(OutFormat::Mp3, &st, false).is_none(), "CBR unless asked");
+    st.bitrate_mode = Some("vbr".into());
+    assert_eq!(vbr_args(OutFormat::Mp3, &st, false).unwrap(), ("libmp3lame", vec!["-q:a".to_string(), "2.0".to_string()]));
+    assert_eq!(vbr_args(OutFormat::M4a, &st, true).unwrap().1, ["-aac_at_mode", "vbr", "-q:a", "4"], "V2 = TVBR 91");
+    assert_eq!(vbr_args(OutFormat::M4a, &st, false).unwrap(), ("aac", vec!["-q:a".to_string(), "1.62".to_string()]));
+    assert_eq!(vbr_args(OutFormat::Ogg, &st, false).unwrap().1, ["-q:a", "8.0"]);
+    assert!(vbr_args(OutFormat::Opus, &st, false).is_none());
+    st.vbr_quality = Some(99.0);
+    assert_eq!(vbr_args(OutFormat::M4a, &st, true).unwrap().1[3], "14");
+}
+
+#[test]
+fn vbr_encodes_hi_res_and_multichannel_sources() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let stereo = make_source(&d.0);
+    let surround = d.0.join("51.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=96000:duration=0.5", "-af", "aformat=channel_layouts=5.1", "-c:a", "pcm_s24le", surround.to_str().unwrap()]);
+    let ff = get_ffmpeg_executable();
+    for src in [&stereo, &surround] {
+        for format in ["MP3", "M4A", "OGG"] {
+            let mut req = request(src, &d.0.join("out"), format, "vbr");
+            req.settings.bitrate_mode = Some("vbr".into());
+            let (path, _) = convert_blocking(&ctx(), &req).unwrap_or_else(|e| panic!("{format} {}: {e}", src.display()));
+            let info = probe_source(&ff, &path).unwrap();
+            assert!(info.duration > 0.4, "{format}");
+            if format == "M4A" && aac_at_available() {
+                assert!(info.sample_rate.unwrap() <= 48000, "AudioToolbox AAC is capped at 48 kHz");
+            }
+        }
     }
 }
 

@@ -113,6 +113,8 @@ const defaultSettings: ConverterSettings = {
   onExisting: 'rename',
   keepFolderLevels: 0,
   keepFolderFrom: 'last',
+  bitrateMode: 'vbr',
+  vbrQuality: 2,
 };
 
 export const AudioConverterProvider = ({ children }: { children: React.ReactNode }) => {
@@ -201,6 +203,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           settings: {
             ...defaultSettings,
             localSavePath: defaultPath,
+            // Tabs saved before VBR existed keep their fixed bitrate.
+            bitrateMode: 'cbr',
             ...t.settings,
           },
           logs: [

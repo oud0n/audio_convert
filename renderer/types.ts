@@ -41,6 +41,9 @@ export interface QualityVerificationResult {
   details: string[];
 }
 
+/** Output formats with a quality-based VBR mode. */
+export const VBR_FORMATS = ['MP3', 'M4A', 'OGG'];
+
 export interface AudioFile {
   id: string;
   name: string;
@@ -108,6 +111,8 @@ export interface ConverterSettings {
   onExisting?: 'rename' | 'overwrite' | 'skip'; // when the output file already exists
   keepFolderLevels?: number; // source folders recreated under the output folder (0 = none)
   keepFolderFrom?: 'last' | 'first'; // count them from the end or the start of the source path
+  bitrateMode?: 'cbr' | 'vbr'; // MP3 / AAC / Vorbis: fixed bitrate or quality-based VBR
+  vbrQuality?: number; // LAME V scale, 0 (best) to 9; AAC and Vorbis get the equivalent
 }
 
 export interface SettingsPreset {
