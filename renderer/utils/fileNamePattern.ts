@@ -90,6 +90,11 @@ function resolveToken(token: string, tags: PatternTags, sourceFileName: string):
   }
 }
 
+/** Replaces `%token%`s in `text` with tag values; unknown or empty tokens become "". */
+export function expandTokens(text: string, tags: PatternTags, sourceFileName = ''): string {
+  return text.replace(/%([a-z0-9]+)%/gi, (_, token: string) => resolveToken(token, tags, sourceFileName) ?? '');
+}
+
 /** Converts the old `{token}` syntax to `%token%`. */
 export function normalizePattern(pattern: string): string {
   let out = pattern;
@@ -202,3 +207,104 @@ export const SUPPORTED_INPUT_EXTENSIONS = [
 
 /** Formats that can hold an embedded CUE sheet or chapters (checked when added). */
 export const IMAGE_CAPABLE_EXTENSIONS = ['flac', 'fla', 'wv', 'ape', 'tta', 'tak', 'm4a', 'm4b', 'mp4', 'mka', 'mkv', 'ogg', 'opus'];
+
+/**
+ * Tag replacement rules in xrecode's tagsreplace.txt format:
+ *
+ *   [*]            every tag          [Title], [Artist], [Album], [Album Artist], [Year],
+ *   [Comments!]    `!` = ignore case  [Date], [Genre], [Track], [Disc], [Comments]
+ *   from=to        replace every `from` with `to`
+ *   <NULL>=to      an empty tag gets `to`;  from=<NULL> clears what matched
+ *   <ANY>=to       any value (empty too) becomes `to`
+ *   %CHANGECASE%=UpperCase | LowerCase | CapitalizEeachWord
+ *
+ * `to` may use %y% %m% %d% (today) and the file name pattern tokens (%track2%,
+ * %totaltracks2%, ...). Lines starting with # are comments. Sections xrecode knows but
+ * this app has no tag for (Composer, Lyrics, ...) are ignored.
+ */
+type Key = 'title' | 'artist' | 'album' | 'albumArtist' | 'year' | 'genre' | 'track' | 'disc' | 'comment';
+const ALL_KEYS: Key[] = ['title', 'artist', 'album', 'albumArtist', 'year', 'genre', 'track', 'disc', 'comment'];
+
+const SECTION_KEYS: Record<string, Key[]> = {
+  '*': ALL_KEYS,
+  title: ['title'],
+  artist: ['artist'],
+  album: ['album'],
+  'album artist': ['albumArtist'],
+  year: ['year'],
+  date: ['year'],
+  genre: ['genre'],
+  track: ['track'],
+  disc: ['disc'],
+  comments: ['comment'],
+  comment: ['comment'],
+};
+
+interface Rule { from: string; to: string }
+interface Section { keys: Key[]; ignoreCase: boolean; rules: Rule[] }
+
+export function parseTagRules(text: string): Section[] {
+  const sections: Section[] = [];
+  let current: Section | null = null;
+  for (const raw of (text || '').replace(/^﻿/, '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith(';')) continue;
+    const head = /^\[(.+)\]$/.exec(line);
+    if (head) {
+      let name = head[1].trim();
+      const ignoreCase = name.endsWith('!');
+      if (ignoreCase) name = name.slice(0, -1).trim();
+      const keys = SECTION_KEYS[name.toLowerCase()];
+      current = keys ? { keys, ignoreCase, rules: [] } : null;
+      if (current) sections.push(current);
+      continue;
+    }
+    const eq = line.indexOf('=');
+    if (!current || eq <= 0) continue;
+    current.rules.push({ from: line.slice(0, eq), to: line.slice(eq + 1) });
+  }
+  return sections;
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function changeCase(value: string, mode: string): string {
+  switch (mode.toLowerCase()) {
+    case 'uppercase': return value.toUpperCase();
+    case 'lowercase': return value.toLowerCase();
+    case 'capitalizeeachword':
+      return value.toLowerCase().replace(/(^|[\s\-_/(\[{"'.])(\p{L})/gu, (_, sep: string, ch: string) => sep + ch.toUpperCase());
+    default: return value;
+  }
+}
+
+/** Applies the rules in order; returns a new tag object (other fields are kept). */
+export function applyTagRules<T extends PatternTags>(tags: T, text: string, now: Date = new Date()): T {
+  const out: T = { ...tags };
+  const sections = parseTagRules(text);
+  if (!sections.length) return out;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const today = (s: string) => s.replace(/%y%/gi, String(now.getFullYear())).replace(/%m%/gi, pad(now.getMonth() + 1)).replace(/%d%/gi, pad(now.getDate()));
+  for (const section of sections) {
+    for (const rule of section.rules) {
+      const target = rule.to === '<NULL>' ? '' : rule.to;
+      for (const key of section.keys) {
+        const value = (out[key] ?? '') as string;
+        let next = value;
+        if (rule.from === '%CHANGECASE%') {
+          next = changeCase(value, rule.to);
+        } else if (rule.from === '<NULL>') {
+          if (!value.trim()) next = expandTokens(today(target), out);
+        } else if (rule.from === '<ANY>') {
+          next = expandTokens(today(target), out);
+        } else if (rule.from && value) {
+          next = value.replace(new RegExp(escapeRegExp(rule.from), section.ignoreCase ? 'gi' : 'g'), () => expandTokens(today(target), out));
+        }
+        (out as any)[key] = next;
+      }
+    }
+  }
+  return out;
+}

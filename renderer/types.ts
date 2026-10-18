@@ -127,7 +127,9 @@ export interface ConverterSettings {
   coverMaxHeight?: number;
   coverFormat?: 'keep' | 'jpeg' | 'png';
   saveCoverFile?: boolean; // also save folder.jpg next to the output
-  replayGain?: 'off' | 'track' | 'album'; // write ReplayGain 2.0 / R128 tags (EBU R128 measured)
+  replayGain?: 'off' | 'track' | 'album';
+  tagReplaceEnabled?: boolean; // apply tagReplaceRules to the output tags (and names)
+  tagReplaceRules?: string; // xrecode tagsreplace.txt format // write ReplayGain 2.0 / R128 tags (EBU R128 measured)
   mergeOutput?: boolean; // join the whole batch into one output file
   mergeCreateCue?: boolean; // write a CUE sheet next to the merged file
   bitrateMode?: 'cbr' | 'vbr'; // MP3 / AAC / Vorbis: fixed bitrate or quality-based VBR

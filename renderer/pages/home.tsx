@@ -5,7 +5,7 @@
 
 import React, { useRef, useState, useEffect } from 'react';
 import Head from 'next/head';
-import { useAudioConverter } from '../context/AudioConverterContext';
+import { useAudioConverter, outputTags } from '../context/AudioConverterContext';
 import { 
   FileAudio, Upload, Trash2, Sliders, Volume2, 
   Plus, X, Save, Settings, Info, RefreshCw, AlertCircle,
@@ -907,7 +907,7 @@ export default function HomeDashboardPage() {
                             }
                             const ext = getFormatExtension(file.outputFormat || settings.outputFormat);
                             const stem = settings.renameByTags && file.tags
-                              ? renderFileName(settings.renamePattern, file.tags, file.name)
+                              ? renderFileName(settings.renamePattern, outputTags(file, settings), file.name)
                               : renderFileName('%filename%', {}, file.name);
                             return `${stem}.${ext}`;
                           })()}

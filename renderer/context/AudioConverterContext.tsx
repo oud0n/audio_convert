@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
 import { analyzeAudioBuffer } from '../utils/audioEncoder';
 import { AppBridge, isPathOnlyFile, type PathOnlyFile, type ImageTrack, type MetadataResult } from '../services/bridge';
-import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS, IMAGE_CAPABLE_EXTENSIONS } from '../utils/fileNamePattern';
+import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS, IMAGE_CAPABLE_EXTENSIONS, applyTagRules } from '../utils/fileNamePattern';
 
 interface AudioConverterContextType {
   files: AudioFile[];
@@ -153,6 +153,11 @@ function imageTrackRecords(
   });
 }
 
+/** The tags an output gets: the row's tags with the tab's replace rules applied. */
+export function outputTags(f: AudioFile, s: ConverterSettings): MetadataTags {
+  return s.tagReplaceEnabled && s.tagReplaceRules ? applyTagRules(f.tags, s.tagReplaceRules) : f.tags;
+}
+
 const AudioConverterContext = createContext<AudioConverterContextType | undefined>(undefined);
 
 const defaultSettings: ConverterSettings = {
@@ -185,6 +190,8 @@ const defaultSettings: ConverterSettings = {
   onExisting: 'rename',
   splitImages: true,
   replayGain: 'off',
+  tagReplaceEnabled: false,
+  tagReplaceRules: '',
   coverExternal: true,
   coverResize: false,
   coverMaxWidth: 400,
@@ -1032,10 +1039,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       ...t, files: t.files.map(f => ids.has(f.id) ? { ...f, ...patch(f) } : f),
     } : t));
     const first = files[0];
-    const performer = first.tags.albumArtist || first.tags.artist || '';
+    const firstTags = outputTags(first, tabSettings);
+    const performer = firstTags.albumArtist || firstTags.artist || '';
     const albumTags = {
-      title: first.tags.album || '', album: first.tags.album || '', artist: performer, albumArtist: performer,
-      year: first.tags.year || '', genre: first.tags.genre || '', disc: first.tags.disc || '',
+      title: firstTags.album || '', album: firstTags.album || '', artist: performer, albumArtist: performer,
+      year: firstTags.year || '', genre: firstTags.genre || '', disc: firstTags.disc || '',
     };
     const stemName = renderFileName('%albumartist% - %album%|%album%|%filename%', albumTags, first.name);
     try {
@@ -1043,7 +1051,10 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       setRows(() => ({ status: 'converting', progress: 0, error: undefined }));
       const res = await AppBridge.mergeAudio({
         jobId: job.id,
-        inputs: files.map(f => ({ path: f.path, startSeconds: f.trackStart ?? null, endSeconds: f.trackEnd ?? null, title: f.tags.title || '', artist: f.tags.artist && f.tags.artist !== performer ? f.tags.artist : '' })),
+        inputs: files.map(f => {
+          const t = outputTags(f, tabSettings);
+          return { path: f.path, startSeconds: f.trackStart ?? null, endSeconds: f.trackEnd ?? null, title: t.title || '', artist: t.artist && t.artist !== performer ? t.artist : '' };
+        }),
         fileName: `${stemName}.${getFormatExtension(tabSettings.outputFormat)}`,
         outputFormat: tabSettings.outputFormat,
         settings: tabSettings,
@@ -1252,8 +1263,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       let replacesPath = '';
 
       const targetExt = getFormatExtension(fileRecord.outputFormat);
+      const outTags = outputTags(fileRecord, tabSettings);
       const outputStem = tabSettings.renameByTags && fileRecord.tags
-        ? renderFileName(tabSettings.renamePattern, fileRecord.tags, fileRecord.name)
+        ? renderFileName(tabSettings.renamePattern, outTags, fileRecord.name)
         : renderFileName('%filename%', {}, fileRecord.name);
       let finalExportName = `${outputStem}.${targetExt}`;
 
@@ -1268,7 +1280,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           fileName: finalExportName,
           outputFormat: fileRecord.outputFormat,
           // Only edited tags; the converter copies everything else from the source.
-          tags: editedTags(fileRecord.tags, fileRecord.sourceTags),
+          tags: editedTags(outTags, fileRecord.sourceTags),
           startSeconds: fileRecord.trackStart ?? null,
           endSeconds: fileRecord.trackEnd ?? null,
         });
