@@ -186,6 +186,24 @@ export function editedTags(current: PatternTags, source: PatternTags | undefined
   return out;
 }
 
+/** xrecode's default file name for "split by channels" (prog.settings.pattern.fpc). */
+export const DEFAULT_CHANNEL_PATTERN = '0%nchannel%_%chname%_%filename%';
+
+/** FFmpeg channel names and the names used for %chname% (xrecode cn_*; side = RL / RR). */
+export const CHANNEL_KEYS = ['FL', 'FR', 'FC', 'LFE', 'BL', 'BR', 'SL', 'SR'];
+export const DEFAULT_CHANNEL_NAMES: Record<string, string> = {
+  FL: 'FL', FR: 'FR', FC: 'C', LFE: 'LFE', BL: 'BL', BR: 'BR', SL: 'RL', SR: 'RR',
+};
+
+/** The output name of one channel: %nchannel% (1-based) and %chname% filled in first. */
+export function renderChannelFileName(pattern: string, index: number, channel: string, names: Record<string, string> | undefined, tags: PatternTags, sourceFileName: string): string {
+  const name = (names ?? DEFAULT_CHANNEL_NAMES)[channel] ?? DEFAULT_CHANNEL_NAMES[channel] ?? channel;
+  const filled = (pattern || DEFAULT_CHANNEL_PATTERN)
+    .replace(/%nchannel%/gi, String(index + 1))
+    .replace(/%chname%/gi, name.replace(/[%|\\/]/g, '_'));
+  return renderFileName(filled, tags, sourceFileName);
+}
+
 export const LOSSLESS_OUTPUT_FORMATS = ['WAV', 'AIFF', 'FLAC', 'ALAC', 'WAVPACK', 'DSF'];
 
 const LOSSLESS_EXTENSIONS = ['wav', 'w64', 'rf64', 'bwf', 'aif', 'aiff', 'aifc', 'flac', 'fla', 'ape', 'wv', 'tta', 'tak'];

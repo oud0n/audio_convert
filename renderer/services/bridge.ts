@@ -161,6 +161,15 @@ export class AppBridge {
     return { success: true, tracks: [], missing: [] };
   }
 
+  /** FFmpeg names of a file's channels, in order (FL, FR, FC, ...). */
+  static async channelNames(path: string): Promise<string[]> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<string[]>('channel_names', { path });
+    }
+    return [];
+  }
+
   /** Parts of a file split by time or by silence (as album-image tracks). */
   static async splitPoints(request: {
     path: string; mode: 'time' | 'silence'; seconds?: number; thresholdDb?: number; minSilence?: number; minLength?: number; preservePauses?: boolean;
@@ -316,6 +325,8 @@ export class AppBridge {
     /** Range of an album-image track inside the original (seconds). */
     startSeconds?: number;
     endSeconds?: number;
+    /** The converted file is this one channel (0-based) of the original. */
+    channel?: number;
   }): Promise<VerificationResponse> {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -326,6 +337,7 @@ export class AppBridge {
         jobId: params.jobId,
         startSeconds: params.startSeconds ?? null,
         endSeconds: params.endSeconds ?? null,
+        channel: params.channel ?? null,
       });
     }
     const ipc = getIpc();

@@ -40,6 +40,7 @@ fn settings(keep: bool) -> ConverterSettings {
         fade_out_seconds: None,
         pad_start_seconds: None,
         pad_end_seconds: None,
+        action_mode: None,
     }
 }
 
@@ -161,6 +162,8 @@ fn src(bits: u32, rate: u32, ch: u32, lossless: bool, float: bool) -> SourceInfo
         range: None,
         external_cover: None,
         cover_is_png: false,
+        layout: None,
+        channel: None,
     }
 }
 
@@ -420,6 +423,7 @@ fn request(input: &Path, out_dir: &Path, format: &str, file_name: &str) -> Conve
         tags: None,
         start_seconds: None,
         end_seconds: None,
+        channel: None,
     }
 }
 
@@ -583,6 +587,7 @@ fn merge_joins_sources_and_writes_a_cue_sheet() {
         tags: Some(InputTags { album: Some("Album".into()), album_artist: Some("A".into()), ..Default::default() }),
         create_cue: Some(true),
         verify: Some(true),
+        join_channels: false,
     };
     let m = merge::merge_blocking(&ctx(), &req).unwrap();
     // The second part was resampled (44.1 -> 96 kHz): no bit-exact claim.
@@ -652,7 +657,7 @@ fn replaygain_tags_are_written_without_touching_the_audio() {
         assert!(tags.iter().any(|(k, _)| k == key), "{}: {tags:?}", p.display());
         assert!(tags.iter().any(|(k, v)| k == "title" && v == "Source"), "{}: other tags kept", p.display());
         // Still this session's output of `src`: another source must not overwrite it.
-        assert!(written_from_other_source(p, &d.0.join("cover.png"), None), "{}", p.display());
+        assert!(written_from_other_source(p, &d.0.join("cover.png"), ""), "{}", p.display());
     }
     assert!(probe_source(&ff, &paths[0]).unwrap().has_art(), "FLAC keeps its cover");
 }
@@ -823,6 +828,85 @@ fn split_by_silence_and_time_finds_the_parts() {
     assert!((t[0].end.unwrap() - 3.0).abs() < 0.05 && (t[1].start - 5.0).abs() < 0.05, "{t:?}");
     let t = crate::audio::cue::split_tracks(&req("time")).unwrap();
     assert_eq!(t.iter().map(|t| (t.start, t.end)).collect::<Vec<_>>(), [(0.0, Some(3.0)), (3.0, Some(6.0)), (6.0, None)]);
+}
+
+#[test]
+fn channels_split_into_mono_files_and_join_back() {
+    assert_eq!(layout_channel_names("5.1(side)", 6), ["FL", "FR", "FC", "LFE", "SL", "SR"]);
+    assert_eq!(layout_channel_names("2 channels (FL+FC)", 2), ["FL", "FC"]);
+    assert_eq!(layout_channel_names("weird", 3), ["c1", "c2", "c3"]);
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let six = d.0.join("six.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "aevalsrc=sin(300*2*PI*t)|sin(400*2*PI*t)|sin(500*2*PI*t)|0.1*sin(50*2*PI*t)|sin(600*2*PI*t)|sin(700*2*PI*t):s=48000:d=0.5",
+        "-af", "aformat=channel_layouts=5.1", "-c:a", "pcm_s24le", six.to_str().unwrap()]);
+    let ff = get_ffmpeg_executable();
+    assert_eq!(probe_source(&ff, &six).unwrap().layout.as_deref(), Some("5.1"));
+    let out = d.0.join("out");
+    let mut monos = Vec::new();
+    for c in 0..6u32 {
+        let mut req = request(&six, &out, "FLAC", &format!("0{}_ch", c + 1));
+        req.channel = Some(c);
+        let (path, _) = convert_blocking(&ctx(), &req).unwrap();
+        let info = probe_source(&ff, &path).unwrap();
+        assert_eq!((info.channels, info.bits_per_sample), (Some(1), Some(24)));
+        let r = crate::audio::audit::verify_quality_part(&six.to_string_lossy(), &path.to_string_lossy(), true, None, Some(c), &|| false).result.unwrap();
+        assert_eq!(r.status, "perfect", "channel {c}");
+        monos.push(path);
+    }
+    let mut req = request(&six, &out, "FLAC", "x");
+    req.channel = Some(6);
+    assert!(convert_blocking(&ctx(), &req).unwrap_err().contains("no channel 7"));
+
+    let mut st = settings(true);
+    st.local_save_path = Some(out.to_string_lossy().into_owned());
+    let join = merge::MergeRequest {
+        inputs: monos.iter().map(|p| merge::MergeInput { path: p.to_string_lossy().into_owned(), start_seconds: None, end_seconds: None, title: String::new(), artist: String::new() }).collect(),
+        file_name: "joined".into(), output_format: "FLAC".into(), job_id: None, settings: st, tags: None, create_cue: Some(true), verify: Some(true), join_channels: true,
+    };
+    let m = merge::merge_blocking(&ctx(), &join).unwrap();
+    assert!(m.cue.is_none());
+    assert_eq!(m.verified.as_ref().map(|v| v.0), Some(true), "{:?}", m.verified);
+    let info = probe_source(&ff, &m.converted.path).unwrap();
+    assert_eq!((info.channels, info.layout.as_deref()), (Some(6), Some("5.1")));
+    assert_eq!(compute_pcm_fingerprint(m.converted.path.to_str().unwrap()).unwrap(), compute_pcm_fingerprint(six.to_str().unwrap()).unwrap(), "joined = original");
+}
+
+#[test]
+fn extract_and_copy_keep_the_stream() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let ff = get_ffmpeg_executable();
+    let mkv = d.0.join("video.mkv");
+    ffmpeg(&["-f", "lavfi", "-i", "color=c=black:s=32x32:d=0.5", "-f", "lavfi", "-i", "sine=duration=0.5", "-c:v", "mjpeg", "-c:a", "libopus", mkv.to_str().unwrap()]);
+    let out = d.0.join("out");
+    let mut req = request(&mkv, &out, "FLAC", "audio");
+    req.settings.action_mode = Some("extract".into());
+    let (path, name) = convert_blocking(&ctx(), &req).unwrap();
+    assert_eq!(name, "audio.opus");
+    let info = probe_source(&ff, &path).unwrap();
+    assert_eq!(info.codec.as_deref(), Some("opus"));
+    // Same packets; Matroska and Ogg trim Opus's start-up samples differently, so only
+    // the length is compared here.
+    assert!((info.duration - 0.5).abs() < 0.05, "{}", info.duration);
+
+    let src = make_source(&d.0);
+    let mut req = request(&src, &out, "MP3", "copied");
+    req.settings.action_mode = Some("copy".into());
+    let (copy, name) = convert_blocking(&ctx(), &req).unwrap();
+    assert_eq!(name, "copied.flac");
+    assert_eq!(fs::read(&copy).unwrap(), fs::read(&src).unwrap(), "byte-identical copy");
+    req.tags = Some(InputTags { title: Some("New".into()), ..Default::default() });
+    let (tagged, _) = convert_blocking(&ctx(), &req).unwrap();
+    assert!(read_source_tags(&ff, &tagged).unwrap().iter().any(|(k, v)| k == "title" && v == "New"));
+    assert!(probe_source(&ff, &tagged).unwrap().has_art());
+    assert_eq!(compute_pcm_fingerprint(tagged.to_str().unwrap()).unwrap(), compute_pcm_fingerprint(src.to_str().unwrap()).unwrap());
+    assert_eq!(extract_container(Some("pcm_s24be")), "aiff");
+    assert_eq!(extract_container(Some("something")), "mka");
 }
 
 #[test]

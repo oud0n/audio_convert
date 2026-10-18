@@ -15,7 +15,7 @@ import { estimateOutputSize } from '../utils/audioEncoder';
 import { MetadataTags, getFormatExtension, VBR_FORMATS } from '../types';
 import { t } from '../utils/i18n';
 import { AppBridge, isTauri, pathOnlyFile } from '../services/bridge';
-import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS } from '../utils/fileNamePattern';
+import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES, CHANNEL_KEYS } from '../utils/fileNamePattern';
 
 export default function HomeDashboardPage() {
   const {
@@ -1163,27 +1163,6 @@ export default function HomeDashboardPage() {
                       />
                       <span>{t(lang, 'splitImages')}</span>
                     </label>
-                    <div className="flex items-center gap-3">
-                      <label className="flex items-center gap-2 text-zinc-400 cursor-pointer hover:text-zinc-250" title={t(lang, 'mergeOutputHelp')}>
-                        <input
-                          type="checkbox"
-                          checked={settings.mergeOutput ?? false}
-                          onChange={(e) => updateSetting('mergeOutput', e.target.checked)}
-                          className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer"
-                        />
-                        <span>{t(lang, 'mergeOutput')}</span>
-                      </label>
-                      <label className={`flex items-center gap-2 text-zinc-400 cursor-pointer hover:text-zinc-250 ${settings.mergeOutput ? '' : 'opacity-40'}`}>
-                        <input
-                          type="checkbox"
-                          disabled={!settings.mergeOutput}
-                          checked={settings.mergeCreateCue ?? true}
-                          onChange={(e) => updateSetting('mergeCreateCue', e.target.checked)}
-                          className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer"
-                        />
-                        <span>{t(lang, 'mergeCreateCue')}</span>
-                      </label>
-                    </div>
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-zinc-400">
                       <label className="flex items-center gap-1.5 cursor-pointer" title={t(lang, 'coverExternalHelp')}>
                         <input type="checkbox" checked={settings.coverExternal ?? true} onChange={(e) => updateSetting('coverExternal', e.target.checked)} className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer" />
@@ -1301,17 +1280,55 @@ export default function HomeDashboardPage() {
                     <span className="text-[10px] text-zinc-500 font-mono font-semibold block mb-1">動作</span>
                     <div className="grid grid-cols-2 gap-2 text-zinc-400">
                       {actionModes.map((act) => (
-                        <label key={act.id} className="flex items-center gap-2 cursor-pointer hover:text-zinc-200">
+                        <label key={act.id} className="flex items-center gap-2 cursor-pointer hover:text-zinc-200" title={t(lang, `actionHelp_${act.id}` as any)}>
                           <input
                             type="radio"
                             name="actionMode"
-                            defaultChecked={act.id === 'encode'}
+                            checked={(settings.actionMode ?? 'encode') === act.id}
+                            onChange={() => updateSetting('actionMode', act.id as any)}
                             className="bg-zinc-900 border-zinc-800 text-emerald-500 accent-emerald-500 cursor-pointer"
                           />
                           <span>{act.label}</span>
                         </label>
                       ))}
                     </div>
+                    {settings.actionMode === 'merge' && (
+                      <label className="mt-1.5 flex items-center gap-2 text-zinc-400 cursor-pointer hover:text-zinc-250">
+                        <input
+                          type="checkbox"
+                          checked={settings.mergeCreateCue ?? true}
+                          onChange={(e) => updateSetting('mergeCreateCue', e.target.checked)}
+                          className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer"
+                        />
+                        <span>{t(lang, 'mergeCreateCue')}</span>
+                      </label>
+                    )}
+                    {settings.actionMode === 'split' && (
+                      <div className="mt-1.5 space-y-1 text-[10px] text-zinc-400">
+                        <div className="flex items-center gap-1.5">
+                          <span>{t(lang, 'channelPattern')}</span>
+                          <input
+                            type="text"
+                            value={settings.channelFilePattern ?? DEFAULT_CHANNEL_PATTERN}
+                            onChange={(e) => updateSetting('channelFilePattern', e.target.value)}
+                            className="flex-1 bg-zinc-900 border border-zinc-800 rounded px-1.5 py-0.5 font-mono text-[11px] text-zinc-300"
+                          />
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1" title={t(lang, 'channelNamesHelp')}>
+                          {CHANNEL_KEYS.map((k) => (
+                            <label key={k} className="flex items-center gap-0.5">
+                              <span className="text-zinc-500">{k}</span>
+                              <input
+                                type="text"
+                                value={(settings.channelNames ?? DEFAULT_CHANNEL_NAMES)[k] ?? k}
+                                onChange={(e) => updateSetting('channelNames', { ...DEFAULT_CHANNEL_NAMES, ...(settings.channelNames ?? {}), [k]: e.target.value })}
+                                className="w-9 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 font-mono text-[10px] text-zinc-300"
+                              />
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="pt-2 border-t border-zinc-900 space-y-2">

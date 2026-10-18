@@ -29,6 +29,7 @@ pub fn run() {
             audio::cue::read_image_tracks_command,
             audio::cue::split_points,
             audio::convert::convert_audio,
+            audio::convert::channel_names,
             audio::convert::merge::merge_audio,
             audio::convert::loudness::write_loudness_tags,
             audio::convert::move_output_into_place,

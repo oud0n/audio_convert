@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
 import { analyzeAudioBuffer } from '../utils/audioEncoder';
 import { AppBridge, isPathOnlyFile, type PathOnlyFile, type ImageTrack, type MetadataResult } from '../services/bridge';
-import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS, IMAGE_CAPABLE_EXTENSIONS, applyTagRules } from '../utils/fileNamePattern';
+import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS, IMAGE_CAPABLE_EXTENSIONS, applyTagRules, renderChannelFileName, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES } from '../utils/fileNamePattern';
 
 interface AudioConverterContextType {
   files: AudioFile[];
@@ -213,7 +213,9 @@ const defaultSettings: ConverterSettings = {
   splitMinSilence: 1.5,
   splitMinLength: 30,
   splitPreservePauses: false,
-  mergeOutput: false,
+  actionMode: 'encode',
+  channelFilePattern: DEFAULT_CHANNEL_PATTERN,
+  channelNames: DEFAULT_CHANNEL_NAMES,
   mergeCreateCue: true,
   keepFolderLevels: 0,
   keepFolderFrom: 'last',
@@ -1014,6 +1016,38 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     setIsConverting(true);
     activeConversionTabIdRef.current = targetTabId;
     let tabFiles = currentTab.files;
+    if ((currentTab.settings.actionMode ?? 'encode') === 'split' && AppBridge.isAvailable()) {
+      // One row per channel of each multichannel source.
+      const replaced = new Map<string, AudioFile[]>();
+      for (const f of queued) {
+        if (f.channelIndex !== undefined || !f.path || f.channels < 2) continue;
+        const names = await AppBridge.channelNames(f.path).catch(() => [] as string[]);
+        const group = f.imageGroup ?? 'ch_' + Math.random().toString(36).substring(2, 11);
+        replaced.set(f.id, Array.from({ length: f.channels }, (_, c) => ({
+          ...f,
+          id: Math.random().toString(36).substring(2, 11),
+          name: `${String(c + 1).padStart(2, '0')} ${names[c] || `c${c + 1}`} ${f.name}`,
+          channels: 1,
+          status: 'queued' as const,
+          progress: 0,
+          error: undefined,
+          originalAudioBuffer: null,
+          channelIndex: c,
+          channelName: names[c] || `c${c + 1}`,
+          imageGroup: group,
+          // The original file name stays the base of %filename%.
+          sourceTags: f.sourceTags,
+        })));
+      }
+      if (replaced.size) {
+        const expand = (files: AudioFile[]) => files.flatMap(f => replaced.get(f.id) ?? [f]);
+        queued = expand(queued);
+        tabFiles = expand(tabFiles);
+        tabsRef.current = tabsRef.current.map(t => t.id === targetTabId ? { ...t, files: expand(t.files) } : t);
+        setTabs(prev => prev.map(t => t.id === targetTabId ? { ...t, files: expand(t.files) } : t));
+        addLogToTab(targetTabId, lang === 'ja' ? `${replaced.size} 個のファイルをチャンネルごとに分けます。` : `Splitting ${replaced.size} files by channel.`, 'info');
+      }
+    }
     const split = currentTab.settings.splitBy ?? 'off';
     if (split !== 'off' && AppBridge.isAvailable()) {
       // Split each whole source into parts (rows like album-image tracks).
@@ -1067,19 +1101,25 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     // Protect every queued source from "overwrite" before the first file starts.
     await AppBridge.setQueuedSources(queued.map((f) => f.path || "").filter(Boolean)).catch(() => {});
     
-    if (currentTab.settings.mergeOutput && queued.length >= 2) {
+    const action = currentTab.settings.actionMode ?? 'encode';
+    if ((action === 'merge' || action === 'encode_multi') && queued.length >= 2) {
       conversionQueueRef.current = [];
-      addLogToTab(targetTabId, lang === 'ja' ? `${queued.length}個のファイルを 1 つに結合します...` : `Merging ${queued.length} items into one file...`, 'info');
-      await runMergeWorkflow(targetTabId, queued);
+      addLogToTab(targetTabId, action === 'merge'
+        ? (lang === 'ja' ? `${queued.length}個のファイルを 1 つに結合します...` : `Merging ${queued.length} items into one file...`)
+        : (lang === 'ja' ? `${queued.length}個のファイルを 1 つの多チャンネルファイルにします...` : `Joining ${queued.length} items as channels of one file...`), 'info');
+      await runMergeWorkflow(targetTabId, queued, action === 'encode_multi');
       finishBatch(targetTabId);
       return;
+    }
+    if (action === 'merge' || action === 'encode_multi') {
+      addLogToTab(targetTabId, lang === 'ja' ? 'ファイルが 1 つなので、通常の変換をします。' : 'Only one file: converting it normally.', 'info');
     }
     addLogToTab(targetTabId, lang === 'ja' ? `${queued.length}個のファイルのバッチ処理を開始します...` : `Starting batch pipeline for ${queued.length} items...`, 'info');
     processNextInQueue();
   };
 
   /** Joins the batch into one output (xrecode "many to one") and writes a CUE sheet. */
-  const runMergeWorkflow = async (tabId: string, files: AudioFile[]) => {
+  const runMergeWorkflow = async (tabId: string, files: AudioFile[], joinChannels = false) => {
     const tab = tabsRef.current.find(t => t.id === tabId);
     if (!tab) return;
     const tabSettings = tab.settings;
@@ -1111,8 +1151,9 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         outputFormat: tabSettings.outputFormat,
         settings: tabSettings,
         tags: albumTags,
-        createCue: tabSettings.mergeCreateCue ?? true,
+        createCue: !joinChannels && (tabSettings.mergeCreateCue ?? true),
         verify: tabSettings.autoVerifyQuality,
+        joinChannels,
       });
       if (!res.success || !res.path) throw new Error(res.error || 'Merge failed');
       if (res.skipped) {
@@ -1316,9 +1357,13 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
 
       const targetExt = getFormatExtension(fileRecord.outputFormat);
       const outTags = outputTags(fileRecord, tabSettings);
-      const outputStem = tabSettings.renameByTags && fileRecord.tags
-        ? renderFileName(tabSettings.renamePattern, outTags, fileRecord.name)
-        : renderFileName('%filename%', {}, fileRecord.name);
+      // A channel row keeps the source's own name for %filename%.
+      const sourceName = fileRecord.channelIndex !== undefined ? baseName(fileRecord.path) : fileRecord.name;
+      const outputStem = fileRecord.channelIndex !== undefined
+        ? renderChannelFileName(tabSettings.channelFilePattern || DEFAULT_CHANNEL_PATTERN, fileRecord.channelIndex, fileRecord.channelName || '', tabSettings.channelNames, outTags, sourceName)
+        : tabSettings.renameByTags && fileRecord.tags
+          ? renderFileName(tabSettings.renamePattern, outTags, fileRecord.name)
+          : renderFileName('%filename%', {}, fileRecord.name);
       let finalExportName = `${outputStem}.${targetExt}`;
 
       let verificationResult: any = undefined;
@@ -1335,6 +1380,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
           tags: editedTags(outTags, fileRecord.sourceTags),
           startSeconds: fileRecord.trackStart ?? null,
           endSeconds: fileRecord.trackEnd ?? null,
+          channel: fileRecord.channelIndex ?? null,
         });
 
         if (saveResult?.success && saveResult.skipped && saveResult.path) {
@@ -1385,6 +1431,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
               isLosslessPair,
               startSeconds: fileRecord.trackStart,
               endSeconds: fileRecord.trackEnd,
+              channel: fileRecord.channelIndex,
             });
 
             checkActive();
@@ -1535,6 +1582,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         isLosslessPair,
         startSeconds: file.trackStart,
         endSeconds: file.trackEnd,
+        channel: file.channelIndex,
       });
 
       if (vRes && vRes.success && vRes.result) {

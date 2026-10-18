@@ -106,6 +106,11 @@ pub struct ConverterSettings {
     pub fade_in_seconds: Option<f64>,
     #[serde(rename = "fadeOutSeconds")]
     pub fade_out_seconds: Option<f64>,
+    /// "extract": the audio stream as it is, in a container for its codec; "copy": the
+    /// file as it is. Both only rename / re-tag (xrecode "Extract" / "Copy"). Anything
+    /// else (or None) converts.
+    #[serde(rename = "actionMode")]
+    pub action_mode: Option<String>,
     /// Silence added before / after the audio, in seconds.
     #[serde(rename = "padStartSeconds")]
     pub pad_start_seconds: Option<f64>,
@@ -145,6 +150,8 @@ pub struct ConvertRequest {
     pub start_seconds: Option<f64>,
     #[serde(rename = "endSeconds")]
     pub end_seconds: Option<f64>,
+    /// Only this channel of the source (0-based), as a mono output.
+    pub channel: Option<u32>,
 }
 
 /// Audio extensions a CUE sheet's FILE may point to after re-encoding.
@@ -161,6 +168,42 @@ pub fn track_range(start: Option<f64>, end: Option<f64>) -> Option<(f64, Option<
     let start = start.filter(|s| s.is_finite() && *s >= 0.0);
     let end = end.filter(|e| e.is_finite() && *e > start.unwrap_or(0.0));
     (start.is_some() || end.is_some()).then(|| (start.unwrap_or(0.0), end))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Passthrough {
+    Extract,
+    Copy,
+}
+
+fn passthrough(settings: &ConverterSettings) -> Option<Passthrough> {
+    match settings.action_mode.as_deref() {
+        Some("extract") => Some(Passthrough::Extract),
+        Some("copy") => Some(Passthrough::Copy),
+        _ => None,
+    }
+}
+
+/// The file extension (and so the container) for an audio stream copied as it is.
+pub fn extract_container(codec: Option<&str>) -> &'static str {
+    match codec.unwrap_or("") {
+        "aac" | "alac" => "m4a",
+        "mp3" | "mp3float" => "mp3",
+        "mp2" | "mp2float" => "mp2",
+        "flac" => "flac",
+        "opus" => "opus",
+        "vorbis" => "ogg",
+        "ac3" => "ac3",
+        "eac3" => "eac3",
+        "dts" => "dts",
+        "truehd" => "thd",
+        "wavpack" => "wv",
+        "tta" => "tta",
+        "wmav1" | "wmav2" | "wmapro" | "wmalossless" => "wma",
+        c if c.starts_with("pcm_") && c.ends_with("be") => "aiff",
+        c if c.starts_with("pcm_") => "wav",
+        _ => "mka",
+    }
 }
 
 /// atempo factors whose product is `ratio` (each must be within 0.5 .. 2).
@@ -245,12 +288,22 @@ pub fn trim_filter(range: (f64, Option<f64>), rate: Option<u32>) -> String {
 
 /// Identity of a conversion source: the file, plus the track range for an image track
 /// (tracks of one image are different sources for "overwrite" and "skip").
-fn source_id(input: &Path, range: Option<(f64, Option<f64>)>) -> Option<String> {
+fn source_id(input: &Path, part: &str) -> Option<String> {
     let key = output_key(input)?;
-    Some(match range {
-        Some((s, e)) => format!("{key}#{s:.6}-{}", e.map_or("end".to_string(), |e| format!("{e:.6}"))),
-        None => key,
-    })
+    Some(if part.is_empty() { key } else { format!("{key}#{part}") })
+}
+
+/// Which part of a source a conversion reads ("" = all of it): a track range and / or
+/// one channel. Different parts are different sources for "overwrite" and "skip".
+pub fn part_key(range: Option<(f64, Option<f64>)>, channel: Option<u32>) -> String {
+    let mut key = String::new();
+    if let Some((s, e)) = range {
+        key.push_str(&format!("{s:.6}-{}", e.map_or("end".to_string(), |e| format!("{e:.6}"))));
+    }
+    if let Some(c) = channel {
+        key.push_str(&format!("/ch{c}"));
+    }
+    key
 }
 
 /// Outputs this app wrote in this session, with the source each came from. "Overwrite"
@@ -282,7 +335,7 @@ fn output_key(path: &Path) -> Option<String> {
 
 /// True when `path` is another source's output from this session, or another source
 /// that is still queued: "overwrite" and "skip" must leave such a file alone.
-fn written_from_other_source(path: &Path, input: &Path, range: Option<(f64, Option<f64>)>) -> bool {
+fn written_from_other_source(path: &Path, input: &Path, part: &str) -> bool {
     let Some(key) = output_key(path) else { return false };
     let input_key = output_key(input);
     if Some(&key) != input_key.as_ref()
@@ -290,7 +343,7 @@ fn written_from_other_source(path: &Path, input: &Path, range: Option<(f64, Opti
     {
         return true;
     }
-    let source = source_id(input, range);
+    let source = source_id(input, part);
     let guard = SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
     guard.as_ref().and_then(|m| m.get(&key)).is_some_and(|src| Some(src) != source.as_ref())
 }
@@ -311,8 +364,8 @@ fn set_queued_sources_blocking(paths: &[PathBuf]) {
     *QUEUED_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(set);
 }
 
-fn record_output(path: &Path, input: &Path, range: Option<(f64, Option<f64>)>) {
-    let (Some(key), Some(source)) = (output_key(path), source_id(input, range)) else { return };
+fn record_output(path: &Path, input: &Path, part: &str) {
+    let (Some(key), Some(source)) = (output_key(path), source_id(input, part)) else { return };
     let mut guard = SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
     guard.get_or_insert_with(HashMap::new).insert(key, source);
 }
@@ -518,6 +571,61 @@ pub struct SourceInfo {
     pub external_cover: Option<PathBuf>,
     /// The embedded cover is PNG (else JPEG).
     pub cover_is_png: bool,
+    /// FFmpeg's channel layout text ("5.1(side)", "2 channels (FL+FC)").
+    pub layout: Option<String>,
+    /// Set when only this channel (0-based) is converted.
+    pub channel: Option<u32>,
+}
+
+/// FFmpeg names of a file's channels, in order ("FL", "FR", "FC", ...).
+#[tauri::command]
+pub async fn channel_names(path: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let info = probe_source(&get_ffmpeg_executable(), Path::new(&path))?;
+        let n = info.channels.unwrap_or(1);
+        Ok(layout_channel_names(info.layout.as_deref().unwrap_or(""), n))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// FFmpeg channel names of a layout, in stream order.
+pub fn layout_channel_names(layout: &str, channels: u32) -> Vec<String> {
+    let names: &[&str] = match layout.trim() {
+        "mono" => &["FC"],
+        "stereo" => &["FL", "FR"],
+        "2.1" => &["FL", "FR", "LFE"],
+        "3.0" => &["FL", "FR", "FC"],
+        "3.0(back)" => &["FL", "FR", "BC"],
+        "4.0" => &["FL", "FR", "FC", "BC"],
+        "quad" => &["FL", "FR", "BL", "BR"],
+        "quad(side)" => &["FL", "FR", "SL", "SR"],
+        "3.1" => &["FL", "FR", "FC", "LFE"],
+        "5.0" => &["FL", "FR", "FC", "BL", "BR"],
+        "5.0(side)" => &["FL", "FR", "FC", "SL", "SR"],
+        "4.1" => &["FL", "FR", "FC", "LFE", "BC"],
+        "5.1" => &["FL", "FR", "FC", "LFE", "BL", "BR"],
+        "5.1(side)" => &["FL", "FR", "FC", "LFE", "SL", "SR"],
+        "6.0" => &["FL", "FR", "FC", "BC", "SL", "SR"],
+        "6.1" => &["FL", "FR", "FC", "LFE", "BC", "SL", "SR"],
+        "7.0" => &["FL", "FR", "FC", "BL", "BR", "SL", "SR"],
+        "7.1" => &["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"],
+        other => {
+            // "2 channels (FL+FC)"
+            if let Some(inner) = other.split('(').nth(1).and_then(|r| r.strip_suffix(')')) {
+                let v: Vec<String> = inner.split('+').map(|n| n.trim().to_string()).collect();
+                if v.len() == channels as usize {
+                    return v;
+                }
+            }
+            &[]
+        }
+    };
+    if names.len() == channels as usize {
+        names.iter().map(|n| n.to_string()).collect()
+    } else {
+        (1..=channels).map(|i| format!("c{i}")).collect()
+    }
 }
 
 /// Cover image files looked for next to a source without an embedded cover, in order.
@@ -692,6 +800,7 @@ pub fn parse_ffmpeg_probe(stderr: &str) -> SourceInfo {
         if let Some(layout) = layout {
             info.channels = channels_from_layout(layout);
             info.custom_layout = layout.split_whitespace().nth(1).is_some_and(|w| w.starts_with("channels"));
+            info.layout = Some(layout.trim().to_string());
         }
         info.lossless = codec_is_lossless(&codec);
         if let Some(fmt) = fmt {
@@ -948,6 +1057,10 @@ pub fn pre_gain_filters(format: OutFormat, settings: &ConverterSettings, source:
     let mut filters = Vec::new();
     if let Some(range) = source.range {
         filters.push(trim_filter(range, source.sample_rate));
+    }
+    if let Some(c) = source.channel {
+        // A pure channel map (gain 1): the samples are copied unchanged.
+        filters.push(format!("pan=mono|c0=c{c}"));
     }
     if !same_as_source(settings) && settings.trim_silence.unwrap_or(false) {
         let db = settings.trim_silence_threshold_db.unwrap_or(-50.0);
@@ -1803,7 +1916,13 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
     }
     let format = OutFormat::parse(&request.output_format)
         .ok_or_else(|| format!("Unsupported output format: {}", request.output_format))?;
-    let ext = format.ext();
+    let action = passthrough(&request.settings);
+    let ext_owned: String = match action {
+        Some(Passthrough::Copy) => input.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).filter(|e| !e.is_empty()).unwrap_or_else(|| "bin".into()),
+        Some(Passthrough::Extract) => extract_container(probe_source(&get_ffmpeg_executable(), &input)?.codec.as_deref()).to_string(),
+        None => format.ext().to_string(),
+    };
+    let ext = ext_owned.as_str();
     let folder_source = folder_source.unwrap_or(&input);
     let mut dir = target_dir(request, folder_source)?;
     if !request.settings.save_in_source_folder.unwrap_or(false) {
@@ -1827,7 +1946,9 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
     // Only an existing file counts (not a folder or a dangling link), and never the
     // source itself: converting a file into its own folder and format is not "done".
     let range = request.range();
-    if on_existing == OnExisting::Skip && planned.is_file() && !is_input(&planned, &input) && !written_from_other_source(&planned, &input, range) {
+    let channel = request.channel;
+    let part = part_key(range, channel);
+    if on_existing == OnExisting::Skip && planned.is_file() && !is_input(&planned, &input) && !written_from_other_source(&planned, &input, &part) {
         let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         return Ok(Converted { path: planned, name, skipped: true, replaces: None, gain_db: None });
     }
@@ -1842,6 +1963,16 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
         source.range = Some((start, end));
         source.duration = (stop - start).max(0.0);
     }
+    if let Some(c) = channel {
+        let n = source.channels.unwrap_or(1);
+        if c >= n {
+            return Err(format!("The source has no channel {} (it has {n})", c + 1));
+        }
+        // From here on the source is the one channel.
+        source.channel = Some(c);
+        source.channels = Some(1);
+        source.custom_layout = false;
+    }
     if source.cover_stream.is_none() && request.settings.cover_external.unwrap_or(true) {
         source.external_cover = folder_source.parent().and_then(find_external_cover);
     }
@@ -1853,7 +1984,7 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
 
     let settings = &request.settings;
     let mut gain_db = None;
-    if !same_as_source(settings) {
+    if !same_as_source(settings) && action.is_none() {
         if settings.normalize.unwrap_or(false) {
             ctx.emit("normalizing", 0.0);
             let mut filters = pre_gain_filters(format, settings, &source);
@@ -1892,14 +2023,43 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
     // channels) applies to the bit stream.
     let dsd_source = dsd::is_dsd_codec(source.codec.as_deref());
     let dop = dsd_source && settings.dop.unwrap_or(false) && matches!(format, OutFormat::Flac | OutFormat::Wav | OutFormat::Aiff);
-    if format == OutFormat::Dsf && !dsd_source {
+    if action.is_none() && format == OutFormat::Dsf && !dsd_source {
         return Err("DSF output needs a DSD source (PCM cannot be turned into DSD)".into());
     }
-    let dsd_copy = format == OutFormat::Dsf || dop;
-    if dsd_copy && range.is_some() {
-        return Err("Tracks of a DSD image can only be converted to PCM".into());
+    let dsd_copy = action.is_none() && (format == OutFormat::Dsf || dop);
+    if dsd_copy && (range.is_some() || channel.is_some()) {
+        return Err("Tracks or single channels of DSD can only be converted to PCM".into());
     }
-    let expected_bits = if dsd_copy {
+    let expected_bits = if let Some(action) = action {
+        if range.is_some() || channel.is_some() {
+            return Err("Extract and Copy work on whole files only (not on tracks or channels)".into());
+        }
+        let edits: Vec<(&str, String)> = request.tags.as_ref().map(edit_pairs).unwrap_or_default();
+        ctx.emit("converting", 0.0);
+        if action == Passthrough::Copy && edits.is_empty() {
+            fs::copy(&input, &temp_output).map_err(|e| format!("Cannot copy the file: {e}"))?;
+        } else {
+            // Streams copied unchanged; only the container (extract) or tags change.
+            let mut args: Vec<String> = vec!["-y".into(), "-i".into(), input.to_string_lossy().into_owned()];
+            if action == Passthrough::Copy {
+                args.extend(["-map".into(), "0".into()]);
+            } else {
+                args.extend(["-map".into(), "0:a:0".into()]);
+                if matches!(ext, "m4a" | "mp3" | "flac") {
+                    if let Some(index) = source.cover_stream {
+                        args.extend(["-map".into(), format!("0:{index}"), "-disposition:v:0".into(), "attached_pic".into()]);
+                    }
+                }
+            }
+            args.extend(["-c".into(), "copy".into(), "-map_metadata".into(), "0".into()]);
+            for (key, value) in edits {
+                args.extend(["-metadata".into(), format!("{key}={value}")]);
+            }
+            args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into(), temp_output.to_string_lossy().into_owned()]);
+            run_ffmpeg(ctx, &ffmpeg, &args, source.duration, "converting")?;
+        }
+        None
+    } else if dsd_copy {
         ctx.emit("converting", 0.0);
         let mut reader = dsd::DsdReader::open(&input)?;
         let cancelled = || ctx.cancelled();
@@ -1945,10 +2105,10 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
     if size == 0 {
         return Err("FFmpeg produced an empty file".into());
     }
-    if format == OutFormat::Wav {
+    if action.is_none() && format == OutFormat::Wav {
         append_wav_tags(&temp_output, &tags)?;
     }
-    if format == OutFormat::Flac && settings.flac_uncompressed.unwrap_or(false) {
+    if action.is_none() && format == OutFormat::Flac && settings.flac_uncompressed.unwrap_or(false) {
         ctx.emit("converting", 99.0);
         let pcm = work.0.join("output.s32");
         let args: Vec<String> = vec![
@@ -2014,7 +2174,7 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
         copied.map_err(|e| format!("Cannot write to output folder: {e}"))?;
         // Another job may have written the same name while this one was encoding.
         let is_source = is_input(&planned, &input);
-        let other_output = written_from_other_source(&planned, &input, range);
+        let other_output = written_from_other_source(&planned, &input, &part);
         if on_existing == OnExisting::Skip && planned.is_file() && !is_source && !other_output {
             let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
             return Ok(Converted { path: planned, name, skipped: true, replaces: None, gain_db: None });
@@ -2030,10 +2190,10 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
         } else {
             publish_unique(&staging, &dir, &stem, ext, ctx)?
         };
-        record_output(&destination, &input, range);
+        record_output(&destination, &input, &part);
         // The output may later take the source's own name (after the source is trashed).
         if let Some(target) = &replaces {
-            record_output(target, &input, range);
+            record_output(target, &input, &part);
         }
         if settings.save_cover_file.unwrap_or(false) {
             // Not fatal: the audio is saved.

@@ -153,16 +153,27 @@ pub fn compute_pcm_fingerprint_cancellable(
     file_path: &str,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
-    compute_pcm_fingerprint_range(file_path, None, cancelled)
+    compute_pcm_fingerprint_part(file_path, None, None, cancelled)
 }
 
 /// Range of a track inside an album image, in seconds (None = the whole file).
 pub type Range = Option<(f64, Option<f64>)>;
 
-fn range_filter(file_path: &str, range: Range) -> Option<String> {
-    let range = range?;
+/// Filters that pick a part of a file: a track range and / or one channel.
+fn part_filters(range: Range, channel: Option<u32>, rate: Option<u32>) -> Vec<String> {
+    let mut f: Vec<String> = range.map(|r| crate::audio::convert::trim_filter(r, rate)).into_iter().collect();
+    if let Some(c) = channel {
+        f.push(format!("pan=mono|c0=c{c}"));
+    }
+    f
+}
+
+fn part_filter(file_path: &str, range: Range, channel: Option<u32>) -> Option<String> {
+    if range.is_none() && channel.is_none() {
+        return None;
+    }
     let rate = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(file_path)).ok().and_then(|i| i.sample_rate);
-    Some(crate::audio::convert::trim_filter(range, rate))
+    Some(part_filters(range, channel, rate).join(","))
 }
 
 /// SHA-256 of the decoded samples (only `range` of them for an image track).
@@ -171,10 +182,20 @@ pub fn compute_pcm_fingerprint_range(
     range: Range,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
+    compute_pcm_fingerprint_part(file_path, range, None, cancelled)
+}
+
+/// SHA-256 of the decoded samples of a part of the file (range and / or one channel).
+pub fn compute_pcm_fingerprint_part(
+    file_path: &str,
+    range: Range,
+    channel: Option<u32>,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> {
     let ffmpeg = get_ffmpeg_executable();
     let mut cmd = crate::audio::convert::hidden_command(&ffmpeg);
     cmd.args(["-v", "error", "-nostdin", "-i", file_path, "-map", "0:a:0"]);
-    if let Some(trim) = range_filter(file_path, range) {
+    if let Some(trim) = part_filter(file_path, range, channel) {
         cmd.args(["-af", &trim]);
     }
     let mut child = cmd
@@ -305,14 +326,16 @@ fn compare_files(
     original: &str,
     converted: &str,
     range: Range,
+    channel: Option<u32>,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<DiffMetrics, Box<dyn std::error::Error + Send + Sync>> {
     let out = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(converted)).map_err(|e| e.to_string())?;
     let src = crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(original)).map_err(|e| e.to_string())?;
     let channels = out.channels.unwrap_or(2).max(1) as usize;
-    let remix = out.channels.filter(|c| src.channels != Some(*c));
+    let src_channels = if channel.is_some() { Some(1) } else { src.channels };
+    let remix = out.channels.filter(|c| src_channels != Some(*c));
     let resample = out.sample_rate.filter(|r| src.sample_rate != Some(*r));
-    let trim = range.map(|r| crate::audio::convert::trim_filter(r, src.sample_rate));
+    let trim = Some(part_filters(range, channel, src.sample_rate).join(",")).filter(|f| !f.is_empty());
     let mut a = spawn_f32_decoder(original, remix, resample, trim)?;
     let mut b = match spawn_f32_decoder(converted, None, None, None) {
         Ok(b) => b,
@@ -370,13 +393,14 @@ pub async fn verify_audio_quality(
     job_id: Option<String>,
     start_seconds: Option<f64>,
     end_seconds: Option<f64>,
+    channel: Option<u32>,
 ) -> VerifyQualityResponse {
     use tauri::Manager;
     let jobs = app.state::<crate::audio::convert::ActiveJobs>().inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let cancelled = crate::audio::convert::job_cancelled_fn(jobs, job_id);
         let range = start_seconds.filter(|s| s.is_finite() && *s >= 0.0).map(|s| (s, end_seconds.filter(|e| e.is_finite() && *e > s)));
-        verify_quality_range(&original_path, &converted_path, is_lossless_pair, range, &cancelled)
+        verify_quality_part(&original_path, &converted_path, is_lossless_pair, range, channel, &cancelled)
     })
     .await
     .unwrap_or_else(|e| VerifyQualityResponse { success: false, result: None, error: Some(e.to_string()) })
@@ -404,6 +428,18 @@ pub fn verify_quality_range(
     range: Range,
     cancelled: &dyn Fn() -> bool,
 ) -> VerifyQualityResponse {
+    verify_quality_part(original_path, converted_path, is_lossless_pair, range, None, cancelled)
+}
+
+/// Like `verify_quality_range`; with `channel`, the converted file is that one channel.
+pub fn verify_quality_part(
+    original_path: &str,
+    converted_path: &str,
+    is_lossless_pair: bool,
+    range: Range,
+    channel: Option<u32>,
+    cancelled: &dyn Fn() -> bool,
+) -> VerifyQualityResponse {
     let (original_path, converted_path) = (original_path.to_string(), converted_path.to_string());
     let now = chrono::Local::now().format("%H:%M:%S").to_string();
 
@@ -416,7 +452,7 @@ pub fn verify_quality_range(
     }
 
     // 0. DoP output of a DSD source: the DSD bits must come back unchanged.
-    if range.is_none() {
+    if range.is_none() && channel.is_none() {
         if let Ok(Some(same)) = crate::audio::convert::dsd::dop_matches(Path::new(&original_path), Path::new(&converted_path), cancelled) {
             if cancelled() {
                 return failure(CANCELLED.into());
@@ -449,7 +485,7 @@ pub fn verify_quality_range(
     }
 
     // 1. Bit-exact SHA-256 Fingerprint check
-    let orig_hash = compute_pcm_fingerprint_range(&original_path, range, cancelled);
+    let orig_hash = compute_pcm_fingerprint_part(&original_path, range, channel, cancelled);
     if cancelled() {
         return failure(CANCELLED.into());
     }
@@ -491,7 +527,7 @@ pub fn verify_quality_range(
     // Compared at the output's rate and channel count (a 96 kHz limit on a 192 kHz
     // source, or a downmix, would otherwise be compared sample by sample at different
     // shapes), in 32-bit float so 24-bit and multichannel differences show.
-    let analysis_result = compare_files(&original_path, &converted_path, range, cancelled);
+    let analysis_result = compare_files(&original_path, &converted_path, range, channel, cancelled);
     if cancelled() {
         return failure(CANCELLED.into());
     }

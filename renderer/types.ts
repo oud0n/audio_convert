@@ -86,6 +86,10 @@ export interface AudioFile {
   cuePath?: string;
   /** The track converted and passed the checks needed before its image may be trashed. */
   trashReady?: boolean;
+  /** "Split by channels": this row is one channel (0-based) of `path`. */
+  channelIndex?: number;
+  /** FFmpeg name of that channel (FL, FR, FC, ...). */
+  channelName?: string;
 }
 
 export interface ConverterSettings {
@@ -145,7 +149,9 @@ export interface ConverterSettings {
   replayGain?: 'off' | 'track' | 'album';
   tagReplaceEnabled?: boolean; // apply tagReplaceRules to the output tags (and names)
   tagReplaceRules?: string; // xrecode tagsreplace.txt format // write ReplayGain 2.0 / R128 tags (EBU R128 measured)
-  mergeOutput?: boolean; // join the whole batch into one output file
+  actionMode?: 'encode' | 'extract' | 'merge' | 'split' | 'encode_multi' | 'copy'; // xrecode's actions
+  channelFilePattern?: string; // file names of "split by channels" (%nchannel%, %chname% and the usual tokens)
+  channelNames?: Record<string, string>; // names used for %chname%, by FFmpeg channel name
   mergeCreateCue?: boolean; // write a CUE sheet next to the merged file
   bitrateMode?: 'cbr' | 'vbr'; // MP3 / AAC / Vorbis: fixed bitrate or quality-based VBR
   vbrQuality?: number; // LAME V scale, 0 (best) to 9; AAC and Vorbis get the equivalent

@@ -38,6 +38,10 @@ pub struct MergeRequest {
     pub create_cue: Option<bool>,
     /// Check that every part of the output is bit-exact with its source.
     pub verify: Option<bool>,
+    /// Put the inputs side by side as the channels of one file (xrecode "encode to a
+    /// multi-channel file") instead of one after another.
+    #[serde(rename = "joinChannels", default)]
+    pub join_channels: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -135,9 +139,118 @@ fn verify_parts(ctx: &JobCtx, request: &MergeRequest, sources: &[(PathBuf, Sourc
     Ok((true, format!("All {} parts are bit-exact with their sources", sources.len())))
 }
 
+/// Joins the inputs as channels: input 1 gives the first channel(s), and so on; the
+/// result has the standard layout for the channel count. Shorter inputs end in silence.
+fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String> {
+    let ffmpeg = get_ffmpeg_executable();
+    let mut sources = Vec::new();
+    for i in &request.inputs {
+        let path = fs::canonicalize(&i.path).map(simplify_verbatim_path).map_err(|_| format!("Input file does not exist: {}", i.path))?;
+        let mut info = probe_source(&ffmpeg, &path)?;
+        if let Some((start, end)) = input_range(i) {
+            info.duration = (end.unwrap_or(info.duration).min(info.duration) - start).max(0.0);
+        }
+        sources.push((path, info));
+    }
+    let rate = sources[0].1.sample_rate.ok_or("Cannot read the sample rate of the first file")?;
+    let total: u32 = sources.iter().map(|(_, s)| s.channels.unwrap_or(1).max(1)).sum();
+    if total > 8 {
+        return Err(format!("{total} channels in all; at most 8 can be joined"));
+    }
+    let float = sources.iter().any(|(_, s)| s.is_float);
+    let bits = sources.iter().map(|(_, s)| s.bits_per_sample.unwrap_or(if s.lossless == Some(false) { 24 } else { 16 })).max().unwrap_or(16);
+    let (sample_fmt, codec, ext) = if float || bits > 24 { (if float { "flt" } else { "s32" }, if float { "pcm_f32le" } else { "pcm_s32le" }, "wav") } else if bits > 16 { ("s32", "flac", "flac") } else { ("s16", "flac", "flac") };
+    let longest = sources.iter().map(|(_, s)| s.duration).fold(0.0, f64::max);
+
+    let work = TempDir(std::env::temp_dir().join(format!("audio-convert-join-{}", uuid::Uuid::new_v4().simple())));
+    fs::create_dir_all(&work.0).map_err(|e| e.to_string())?;
+    let joined = work.0.join(format!("joined.{ext}"));
+    let mut args: Vec<String> = vec!["-y".into()];
+    for (path, _) in &sources {
+        args.extend(["-i".into(), path.to_string_lossy().into_owned()]);
+    }
+    let mut graph = String::new();
+    for (n, ((_, info), input)) in sources.iter().zip(&request.inputs).enumerate() {
+        let mut f = Vec::new();
+        if let Some(range) = input_range(input) {
+            f.push(trim_filter(range, info.sample_rate));
+        }
+        if info.custom_layout {
+            if let Some(c) = info.channels {
+                f.push(format!("channelmap=channel_layout={}", layout_name(c)));
+            }
+        }
+        if info.sample_rate != Some(rate) {
+            f.push(resample_filter(rate));
+        }
+        f.push(format!("aformat=sample_fmts={sample_fmt}"));
+        f.push(format!("apad=whole_dur={longest:.6}"));
+        graph.push_str(&format!("[{n}:a:0]{}[a{n}];", f.join(",")));
+    }
+    for n in 0..sources.len() {
+        graph.push_str(&format!("[a{n}]"));
+    }
+    graph.push_str(&format!("amerge=inputs={},aformat=channel_layouts={}[out]", sources.len(), layout_name(total)));
+    args.extend(["-filter_complex".into(), graph, "-map".into(), "[out]".into(), "-c:a".into(), codec.into()]);
+    if codec == "flac" {
+        args.extend(["-compression_level".into(), "0".into(), "-frame_size".into(), "4096".into(), "-bits_per_raw_sample".into(), (if bits > 16 { 24 } else { 16 }).to_string()]);
+    } else {
+        args.extend(["-rf64".into(), "auto".into()]);
+    }
+    args.extend(["-progress".into(), "pipe:1".into(), "-nostats".into(), joined.to_string_lossy().into_owned()]);
+    run_ffmpeg(ctx, &ffmpeg, &args, longest, "decoding")?;
+    ctx.check()?;
+
+    let convert = ConvertRequest {
+        input_file_path: joined.to_string_lossy().into_owned(),
+        file_name: request.file_name.clone(),
+        output_format: request.output_format.clone(),
+        job_id: request.job_id.clone(),
+        settings: request.settings.clone(),
+        tags: request.tags.clone(),
+        start_seconds: None,
+        end_seconds: None,
+        channel: None,
+    };
+    let converted = convert_core(ctx, &convert, Some(&sources[0].0))?;
+    if converted.skipped || !request.verify.unwrap_or(false) {
+        return Ok(Merged { converted, cue: None, verified: None });
+    }
+    ctx.emit("verifying", 0.0);
+    // Each input against its channel(s) of the output, sample for sample.
+    let out = probe_source(&ffmpeg, &converted.path)?;
+    let verified = if out.lossless != Some(true) || out.sample_rate != Some(rate) {
+        (false, "The output is not a lossless copy at the inputs' rate, so it cannot be compared bit for bit".to_string())
+    } else {
+        let mut result = (true, format!("All {} inputs are bit-exact in their channels", sources.len()));
+        let mut first_channel = 0;
+        let cancelled = || ctx.cancelled();
+        for (n, ((path, info), input)) in sources.iter().zip(&request.inputs).enumerate() {
+            let count = info.channels.unwrap_or(1).max(1);
+            let same_shape = info.sample_rate == Some(rate) && info.duration >= longest - 0.001 && info.is_float == out.is_float;
+            if !same_shape || count != 1 {
+                result = (false, format!("Input {} was resampled, padded or has several channels, so it cannot be compared bit for bit", n + 1));
+                break;
+            }
+            let a = crate::audio::audit::compute_pcm_fingerprint_part(&path.to_string_lossy(), input_range(input), None, &cancelled).map_err(|e| e.to_string())?;
+            let b = crate::audio::audit::compute_pcm_fingerprint_part(&converted.path.to_string_lossy(), None, Some(first_channel), &cancelled).map_err(|e| e.to_string())?;
+            if a != b {
+                result = (false, format!("Input {} differs from its channel", n + 1));
+                break;
+            }
+            first_channel += count;
+        }
+        result
+    };
+    Ok(Merged { converted, cue: None, verified: Some(verified) })
+}
+
 pub(super) fn merge_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String> {
     if request.inputs.len() < 2 {
         return Err("Merging needs at least two files".into());
+    }
+    if request.join_channels {
+        return join_blocking(ctx, request);
     }
     let ffmpeg = get_ffmpeg_executable();
     let mut sources = Vec::new();
@@ -279,6 +392,7 @@ pub(super) fn merge_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Mer
         tags: request.tags.clone(),
         start_seconds: None,
         end_seconds: None,
+        channel: None,
     };
     let converted = convert_core(ctx, &convert, Some(&sources[0].0))?;
     if converted.skipped {
