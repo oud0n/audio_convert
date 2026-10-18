@@ -403,13 +403,13 @@ export default function WaveformEditorPage() {
                   <div className="p-2.5 bg-zinc-950/50 rounded border border-zinc-800/50">
                     <span className="text-zinc-500 text-[9px] block">PEAK LEVEL</span>
                     <span className="text-rose-400 font-bold block text-sm mt-0.5">
-                      {selectedFile.peakDb !== undefined ? `${selectedFile.peakDb} dBFS` : 'CALCULATING...'}
+                      {selectedFile.peakDb !== undefined ? `${selectedFile.peakDb} dBFS` : selectedFile.originalDeleted ? '--' : 'CALCULATING...'}
                     </span>
                   </div>
                   <div className="p-2.5 bg-zinc-950/50 rounded border border-zinc-800/50">
                     <span className="text-zinc-500 text-[9px] block">RMS AMPLITUDE</span>
                     <span className="text-amber-500 font-bold block text-sm mt-0.5">
-                      {selectedFile.rmsDb !== undefined ? `${selectedFile.rmsDb} dBFS` : 'CALCULATING...'}
+                      {selectedFile.rmsDb !== undefined ? `${selectedFile.rmsDb} dBFS` : selectedFile.originalDeleted ? '--' : 'CALCULATING...'}
                     </span>
                   </div>
                   <div className="p-2.5 bg-zinc-950/50 rounded border border-zinc-800/50">

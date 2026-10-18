@@ -149,6 +149,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const activeConversionTabIdRef = useRef<string | null>(null);
   const jobRef = useRef<{ id: string; cancelled: boolean } | null>(null);
   const batchRef = useRef({ success: 0, failed: 0, warnings: 0 });
+  /** Files of the running batch (files added while it runs are not part of it). */
+  const batchFileIdsRef = useRef<Set<string>>(new Set());
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   useEffect(() => {
@@ -286,7 +288,10 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         if (stale || !buffer) return;
         const info = analyzeAudioBuffer(buffer);
         setTabs(prev => prev.map(t => t.files.some(f => f.id === keepId)
-          ? { ...t, files: t.files.map(f => f.id === keepId ? { ...f, originalAudioBuffer: buffer, previewError: undefined, peakDb: info.peakDb, rmsDb: info.rmsDb } : f) }
+          ? { ...t, files: t.files.map(f => f.id === keepId ? (f.originalDeleted
+              // The preview comes from the output; Peak/RMS stay the source's (or unknown).
+              ? { ...f, originalAudioBuffer: buffer, previewError: undefined }
+              : { ...f, originalAudioBuffer: buffer, previewError: undefined, peakDb: info.peakDb, rmsDb: info.rmsDb }) : f) }
           : t));
       })
       .catch((err) => {
@@ -822,6 +827,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     batchRef.current = { success: 0, failed: 0, warnings: 0 };
     activeConversionTabIdRef.current = targetTabId;
     conversionQueueRef.current = queued.map((f) => f.id);
+    batchFileIdsRef.current = new Set(queued.map((f) => f.id));
     // Protect every queued source from "overwrite" before the first file starts.
     await AppBridge.setQueuedSources(queued.map((f) => f.path || "").filter(Boolean)).catch(() => {});
     
@@ -857,10 +863,21 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         });
       }
 
-      if (tabSettings.autoRemoveCompleted) {
+      // Like xrecode: when every file of the batch converted cleanly, the batch leaves
+      // the queue. After a failure (or a quality warning) the queue stays as it is, and
+      // the failed files' sources were never moved to the trash.
+      const batchIds = batchFileIdsRef.current;
+      if (!failed && !warnings) {
         setTabs(prev => prev.map(t => t.id === targetTabId ? {
           ...t,
-          files: t.files.filter((f) => f.status !== 'completed')
+          files: t.files.filter((f) => !batchIds.has(f.id)),
+          selectedFileId: t.selectedFileId && batchIds.has(t.selectedFileId) ? null : t.selectedFileId,
+        } : t));
+      } else if (tabSettings.autoRemoveCompleted) {
+        setTabs(prev => prev.map(t => t.id === targetTabId ? {
+          ...t,
+          files: t.files.filter((f) => f.status !== 'completed'),
+          selectedFileId: t.files.some(f => f.id === t.selectedFileId && f.status === 'completed') ? null : t.selectedFileId,
         } : t));
       }
       return;
@@ -1200,7 +1217,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       if (t.id === targetTabId) {
         return {
           ...t,
-          files: t.files.map(f => ({
+          files: t.files.map(f => f.originalDeleted ? f : ({
             ...f,
             status: 'queued',
             progress: 0,
