@@ -15,6 +15,35 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // macOS: "Support the developer" in the Help menu, like ds_universal (it opens
+            // the same dialog as the header button). Windows and Linux keep no menu bar.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem};
+                use tauri::Emitter;
+                let menu = Menu::default(app.handle())?;
+                let support = MenuItem::with_id(app, "support", "開発者を支援 (Buy Me a Coffee)...", true, None::<&str>)?;
+                let help = menu.items()?.into_iter().find_map(|item| match item {
+                    MenuItemKind::Submenu(sub) if sub.text().is_ok_and(|t| t == "Help") => Some(sub),
+                    _ => None,
+                });
+                match help {
+                    Some(help) => {
+                        help.prepend(&PredefinedMenuItem::separator(app)?)?;
+                        help.prepend(&support)?;
+                    }
+                    None => {
+                        let sub = tauri::menu::Submenu::with_items(app, "Help", true, &[&support])?;
+                        menu.append(&sub)?;
+                    }
+                }
+                app.set_menu(menu)?;
+                app.on_menu_event(|app, event| {
+                    if event.id() == "support" {
+                        let _ = app.emit("open-donate-modal", ());
+                    }
+                });
+            }
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()

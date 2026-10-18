@@ -1,5 +1,7 @@
 # Audio Converter
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-oud0n-FFDD00?style=flat&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/oud0n)
+
 [日本語 (Japanese)](#-日本語) | [English](#-english)
 
 ---
@@ -62,6 +64,16 @@ npm run build
   - 本アプリの変換機能は、現在のところ**提示音源を使って `FLAC`・`WAV`・`ALAC` 出力を動作検証**を行っています。その他の形式への変換については、正常にエンコードされない、または一部のメタデータが引き継がれない可能性があります。
 * **アートワーク（アルバムアート）の欠落**:
   - 音声ファイルの変換（デコード・再エンコード）処理を行う際、基本的なテキストタグ情報（タイトル、アーティスト等）は保持されますが、**MP3・FLAC・M4A・ALACでは先頭の埋め込み画像を保持します**。WAV・AIFFなど他の形式では画像を保持しません。
+
+---
+
+### ☕ 開発者を支援（Buy Me a Coffee）
+
+**Audio Convert (`audio_convert`)** は個人開発のプロジェクトです（無料・ソースコード公開）。
+xrecode 互換の変換、ロスレスのビット一致検証、CUE 分割や DSD 対応などの開発を続けるため、コーヒー1杯（$3〜）からのご支援をいただけると大変励みになります！☕🎧
+アプリでは、画面右上の「支援」ボタン（macOS ではメニューの「Help」→「開発者を支援」）から開けます。
+
+👉 **[Buy Me a Coffee で oud0n を支援する](https://buymeacoffee.com/oud0n)**
 
 ---
 
@@ -141,3 +153,11 @@ npm run build
 - 正規化解析と変換の進捗はFFmpegの処理時刻から表示します。バッチ終了通知は成功・失敗・要確認の件数を表示します。
 
 The native FFmpeg pipeline applies conversion settings, and preserves supported source precision; once the source is in the trash, the waveform and player use the saved output. Output names retain Unicode while sanitizing Windows restrictions. When the output name exists, the file gets a number (`name_2`, `name_3`, ...), replaces it, or is skipped, as set (default: number); the source file itself, other sources still waiting in the queue, and outputs this app wrote from a different source in the same session are never replaced or treated as done (they get a number). Sample rates are converted with soxr at its highest quality. FLAC can be written at levels 0-8 or uncompressed (every subframe VERBATIM). Publication uses hard links with an exclusive-copy fallback for FAT/exFAT. Exact PCM verification uses float64 PCM SHA-256 plus audio structure and decoded byte count. Failed analysis never passes verification. Optional source trashing is withheld when enabled automatic verification fails or reports warning/degraded.
+
+### ☕ Support the developer (Buy Me a Coffee)
+
+**Audio Convert (`audio_convert`)** is a personal project (free and source-available).
+Your support, from the price of a coffee ($3 and up), keeps xrecode-compatible conversion, bit-exact lossless checks, CUE splitting and DSD support moving forward. ☕🎧
+In the app, use the "Support" button at the top right (on macOS also Help → 開発者を支援).
+
+👉 **[Support oud0n on Buy Me a Coffee](https://buymeacoffee.com/oud0n)**

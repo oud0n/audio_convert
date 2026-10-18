@@ -181,6 +181,16 @@ export class AppBridge {
     return { success: false, tracks: [], missing: [], error: 'Needs the desktop app' };
   }
 
+  /** Opens a web page in the system browser (the app's own window never navigates away). */
+  static async openExternal(url: string): Promise<void> {
+    if (isTauri()) {
+      const { openUrl } = await import('@tauri-apps/plugin-opener');
+      await openUrl(url);
+      return;
+    }
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
   /** Native picker for audio files or folders (Tauri only; paths, not file contents). */
   static async pickAudioPaths(folders: boolean, extensions: string[]): Promise<string[]> {
     const { open } = await import('@tauri-apps/plugin-dialog');

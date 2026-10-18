@@ -9,8 +9,9 @@ import { useAudioConverter, outputTags } from '../context/AudioConverterContext'
 import { 
   FileAudio, Upload, Trash2, Sliders, Volume2, 
   Plus, X, Save, Settings, Info, RefreshCw, AlertCircle,
-  ShieldCheck
+  ShieldCheck, Coffee
 } from '../components/Icons';
+import { DonateModal } from '../components/DonateModal';
 import { estimateOutputSize } from '../utils/audioEncoder';
 import { MetadataTags, getFormatExtension, VBR_FORMATS } from '../types';
 import { t } from '../utils/i18n';
@@ -85,6 +86,18 @@ export default function HomeDashboardPage() {
   const [bottomTab, setBottomTab] = useState<'source' | 'metadata' | 'quality' | 'log'>('source');
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [showPatternHelpModal, setShowPatternHelpModal] = useState(false);
+  const [showDonateModal, setShowDonateModal] = useState(false);
+  // The app menu's "Support the developer" item opens the same dialog.
+  useEffect(() => {
+    if (!AppBridge.isAvailable()) return;
+    let off: (() => void) | undefined;
+    let gone = false;
+    import('@tauri-apps/api/event')
+      .then(({ listen }) => listen('open-donate-modal', () => setShowDonateModal(true)))
+      .then((unlisten) => { if (gone) unlisten(); else off = unlisten; })
+      .catch(() => {});
+    return () => { gone = true; off?.(); };
+  }, []);
   const [dragActive, setDragActive] = useState(false);
   const [showDebugLogs, setShowDebugLogs] = useState(false);
 
@@ -723,6 +736,15 @@ export default function HomeDashboardPage() {
               </button>
             </div>
             
+            <button
+              onClick={() => setShowDonateModal(true)}
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded border border-amber-400/30 bg-amber-400/10 text-amber-300 hover:bg-amber-400/20 text-[10px] font-semibold transition-colors cursor-pointer"
+              title={lang === 'ja' ? 'Buy Me a Coffee で開発者を支援' : 'Support the developer on Buy Me a Coffee'}
+            >
+              <Coffee className="h-3.5 w-3.5 text-amber-400" />
+              <span>{lang === 'ja' ? '支援' : 'Support'}</span>
+            </button>
+
             <div className="flex items-center gap-2 font-sans font-bold text-white">
               <Volume2 className="h-4 w-4 text-emerald-400 shrink-0" />
               <span>Audio Convert</span>
@@ -2327,6 +2349,9 @@ export default function HomeDashboardPage() {
             </div>
           </div>
         )}
+
+        {/* Support the developer (Buy Me a Coffee) */}
+        <DonateModal isOpen={showDonateModal} onClose={() => setShowDonateModal(false)} lang={lang} />
 
       </div>
     </>
