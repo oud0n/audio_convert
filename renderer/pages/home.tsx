@@ -207,6 +207,16 @@ export default function HomeDashboardPage() {
       ctx.stroke();
     }
 
+    // Long files are previewed only from the start (see the README); say so.
+    if (selectedFile.duration && buffer.duration + 1 < selectedFile.duration) {
+      const mins = Math.floor(buffer.duration / 60);
+      const secs = Math.floor(buffer.duration % 60).toString().padStart(2, '0');
+      ctx.font = '10px "JetBrains Mono", monospace';
+      ctx.fillStyle = '#f59e0b';
+      ctx.textAlign = 'right';
+      ctx.fillText(lang === 'ja' ? `プレビューは先頭 ${mins}:${secs} のみ` : `PREVIEW: FIRST ${mins}:${secs} ONLY`, width - 8, 14);
+    }
+
     // Playhead
     const cursorX = playbackProgress * width;
     ctx.strokeStyle = '#f43f5e'; // rose-500

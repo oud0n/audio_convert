@@ -88,30 +88,31 @@ pub struct ConvertRequest {
     pub job_id: Option<String>,
     pub settings: ConverterSettings,
     pub tags: Option<InputTags>,
-    /// Conversions with the same batch id never overwrite each other's outputs.
-    #[serde(rename = "batchId", default)]
-    pub batch_id: Option<String>,
 }
 
-/// Outputs written by the current batch: "overwrite" replaces files that were there
-/// before, never one an earlier file of the same batch just wrote.
-static BATCH_OUTPUTS: Mutex<Option<(String, std::collections::HashSet<PathBuf>)>> = Mutex::new(None);
+/// Outputs this app wrote in this session, with the source each came from. "Overwrite"
+/// and "skip" act on files that were there before (or on an earlier output of the same
+/// source); an output made from another source gets a new name instead, so a batch,
+/// a retry or a later batch never replaces another file's only copy.
+static SESSION_OUTPUTS: Mutex<Option<HashMap<PathBuf, PathBuf>>> = Mutex::new(None);
 
-fn written_by_batch(batch: Option<&str>, path: &Path) -> bool {
-    let (Some(batch), Ok(real)) = (batch, fs::canonicalize(path)) else { return false };
-    let guard = BATCH_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref().is_some_and(|(id, set)| id == batch && set.contains(&real))
+fn output_key(path: &Path) -> Option<PathBuf> {
+    fs::canonicalize(path).ok().map(|p| {
+        // Linux case-insensitive mounts keep the given case; compare without it there too.
+        if cfg!(target_os = "linux") { PathBuf::from(p.to_string_lossy().to_lowercase()) } else { p }
+    })
 }
 
-fn record_batch_output(batch: Option<&str>, path: &Path) {
-    let (Some(batch), Ok(real)) = (batch, fs::canonicalize(path)) else { return };
-    let mut guard = BATCH_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
-    match guard.as_mut() {
-        Some((id, set)) if id == batch => {
-            set.insert(real);
-        }
-        _ => *guard = Some((batch.to_string(), std::collections::HashSet::from([real]))),
-    }
+fn written_from_other_source(path: &Path, input: &Path) -> bool {
+    let Some(key) = output_key(path) else { return false };
+    let guard = SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().and_then(|m| m.get(&key)).is_some_and(|src| src != input)
+}
+
+fn record_output(path: &Path, input: &Path) {
+    let Some(key) = output_key(path) else { return };
+    let mut guard = SESSION_OUTPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(HashMap::new).insert(key, input.to_path_buf());
 }
 
 #[derive(Serialize, Debug)]
@@ -1422,7 +1423,7 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
     let planned = dir.join(format!("{stem}.{ext}"));
     // Only an existing file counts (not a folder or a dangling link), and never the
     // source itself: converting a file into its own folder and format is not "done".
-    if on_existing == OnExisting::Skip && planned.is_file() && !is_input(&planned, &input) {
+    if on_existing == OnExisting::Skip && planned.is_file() && !is_input(&planned, &input) && !written_from_other_source(&planned, &input) {
         let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         return Ok(Converted { path: planned, name, skipped: true, replaces: None, gain_db: None });
     }
@@ -1545,16 +1546,15 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
         copied.map_err(|e| format!("Cannot write to output folder: {e}"))?;
         // Another job may have written the same name while this one was encoding.
         let is_source = is_input(&planned, &input);
-        if on_existing == OnExisting::Skip && planned.is_file() && !is_source {
+        let other_output = written_from_other_source(&planned, &input);
+        if on_existing == OnExisting::Skip && planned.is_file() && !is_source && !other_output {
             let name = planned.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
             return Ok(Converted { path: planned, name, skipped: true, replaces: None, gain_db: None });
         }
         // Overwrite never replaces the source file itself; that falls back to a new name
         // (the UI may move it into place after the source went to the trash).
         let replaces = (on_existing == OnExisting::Overwrite && is_source).then(|| planned.clone());
-        let batch = request.batch_id.as_deref();
-        let own_output = written_by_batch(batch, &planned);
-        let destination = if on_existing == OnExisting::Overwrite && !is_source && !own_output && !planned.is_dir() {
+        let destination = if on_existing == OnExisting::Overwrite && !is_source && !other_output && !planned.is_dir() {
             ctx.check()?;
             // Same folder, so this is an atomic replace (MoveFileEx REPLACE_EXISTING on Windows).
             fs::rename(&staging, &planned).map_err(|e| format!("Failed to save output file: {e}"))?;
@@ -1562,7 +1562,11 @@ fn convert_blocking_ex(ctx: &JobCtx, request: &ConvertRequest) -> Result<Convert
         } else {
             publish_unique(&staging, &dir, &stem, ext, ctx)?
         };
-        record_batch_output(batch, &destination);
+        record_output(&destination, &input);
+        // The output may later take the source's own name (after the source is trashed).
+        if let Some(target) = &replaces {
+            record_output(target, &input);
+        }
         let name = destination.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
         Ok(Converted { path: destination, name, skipped: false, replaces, gain_db })
     }
@@ -1619,68 +1623,94 @@ pub async fn finish_conversion_job(state: tauri::State<'_, ActiveJobs>, job_id: 
     Ok(())
 }
 
-/// Newest preview request id (ids come from the page and only grow); an older decode
-/// stops as soon as a newer request or a cancel arrives, whatever order they arrive in.
-static LATEST_PREVIEW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Preview decodes that are running, by the page's request id, and ids cancelled before
+/// their decode started (a cancel can arrive first). A cancel stops only its own request.
+static PREVIEWS: Mutex<Option<(HashMap<u64, Arc<std::sync::atomic::AtomicBool>>, std::collections::VecDeque<u64>)>> = Mutex::new(None);
 
-fn preview_superseded(id: u64) -> bool {
-    LATEST_PREVIEW.load(std::sync::atomic::Ordering::SeqCst) > id
+/// Registers a preview decode; returns its cancel flag (already set if cancelled early).
+fn start_preview(id: u64) -> Arc<std::sync::atomic::AtomicBool> {
+    let mut guard = PREVIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    let (running, early) = guard.get_or_insert_with(Default::default);
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(early.contains(&id)));
+    early.retain(|x| *x != id);
+    running.insert(id, flag.clone());
+    flag
+}
+
+fn finish_preview(id: u64) {
+    let mut guard = PREVIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((running, _)) = guard.as_mut() {
+        running.remove(&id);
+    }
+}
+
+/// Stops the preview decode with this request id (now, or when it starts).
+#[tauri::command]
+pub fn cancel_preview(request_id: u64) {
+    let mut guard = PREVIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    let (running, early) = guard.get_or_insert_with(Default::default);
+    match running.get(&request_id) {
+        Some(flag) => flag.store(true, std::sync::atomic::Ordering::SeqCst),
+        None => {
+            // Most such ids belong to decodes that already finished; keep only a few.
+            early.push_back(request_id);
+            while early.len() > 64 {
+                early.pop_front();
+            }
+        }
+    }
 }
 
 /// Audio values (samples x channels) one preview may hold: 20 minutes of 48 kHz stereo.
 const PREVIEW_BUDGET: f64 = 48_000.0 * 2.0 * 1200.0;
 
-/// Rate, channels and length limit for the waveform/player preview. High rates go down
-/// to 44.1/48 kHz; long files go to mono, then to a lower rate, then are cut, so the
-/// decoded audio stays within `PREVIEW_BUDGET`.
-pub fn preview_plan(source_rate: Option<u32>, duration: f64) -> (Option<u32>, u32, Option<f64>) {
+/// Rate, channels and length limit (seconds) for the waveform/player preview. High rates
+/// go down to 44.1/48 kHz; long files go to mono, then to a lower rate (never above the
+/// source's), then are cut. The limit always applies, so a wrong or unknown duration
+/// cannot make the preview larger than `PREVIEW_BUDGET`.
+pub fn preview_plan(source_rate: Option<u32>, duration: f64) -> (Option<u32>, u32, f64) {
     let family = |r: u32| if r % 11_025 == 0 { 44_100 } else { 48_000 };
-    let mut rate = match source_rate {
-        Some(r) if r > 48_000 => family(r),
-        Some(r) => r,
-        None => 48_000,
+    let src = source_rate.unwrap_or(48_000).max(1);
+    let full = if src > 48_000 { family(src) } else { src };
+    let plan = |rate: u32, channels: u32| {
+        let limit = PREVIEW_BUDGET / (f64::from(rate) * f64::from(channels));
+        ((source_rate != Some(rate)).then_some(rate), channels, limit)
     };
-    let changed_rate = source_rate.is_none_or(|r| r != rate);
-    if !(duration > 0.0) || duration * f64::from(rate) * 2.0 <= PREVIEW_BUDGET {
-        return (changed_rate.then_some(rate), 2, None);
+    let known = duration.is_finite() && duration > 0.0;
+    if known && duration * f64::from(full) * 2.0 <= PREVIEW_BUDGET {
+        return plan(full, 2);
     }
-    if duration * f64::from(rate) <= PREVIEW_BUDGET {
-        return (changed_rate.then_some(rate), 1, None);
+    if !known || duration * f64::from(full) <= PREVIEW_BUDGET {
+        return plan(full, 1);
     }
-    // Mono at a quarter of 44.1/48 kHz at most, then cut to what fits.
-    let low = family(rate) / 4;
-    rate = rate.min(low.max((PREVIEW_BUDGET / duration) as u32));
-    let rate = if rate < low { low } else { rate };
-    let limit = (duration * f64::from(rate) > PREVIEW_BUDGET).then(|| PREVIEW_BUDGET / f64::from(rate));
-    (Some(rate), 1, limit)
+    // Mono at a lower rate (down to a quarter of 44.1/48 kHz, or the source's own rate
+    // if that is lower), then cut to what fits.
+    let floor = (family(full) / 4).min(full);
+    let fit = (PREVIEW_BUDGET / duration) as u32;
+    plan(fit.clamp(floor, full), 1)
 }
 
 /// Decodes a file to 16-bit WAV for the waveform and player (see `preview_plan`). The
-/// bytes go to the page as binary, not a JSON array.
+/// bytes go to the page as binary, not a JSON array. `cancel_preview` stops it.
 #[tauri::command]
 pub async fn decode_audio_to_wav(file_path: String, request_id: Option<u64>) -> Result<tauri::ipc::Response, String> {
-    use std::sync::atomic::Ordering;
-    let id = request_id.unwrap_or_else(|| LATEST_PREVIEW.load(Ordering::SeqCst) + 1);
-    LATEST_PREVIEW.fetch_max(id, Ordering::SeqCst);
-    let superseded = move || preview_superseded(id);
-    tauri::async_runtime::spawn_blocking(move || {
+    let id = request_id.unwrap_or_else(|| u64::from(uuid::Uuid::new_v4().as_fields().0) | (1 << 63));
+    let flag = start_preview(id);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let cancelled = || flag.load(std::sync::atomic::Ordering::SeqCst);
         let probe = probe_source(&get_ffmpeg_executable(), Path::new(&file_path)).ok();
         let (rate, channels, limit) = preview_plan(probe.as_ref().and_then(|p| p.sample_rate), probe.map_or(0.0, |p| p.duration));
-        let temp = crate::audio::audit::decode_to_temp_wav_with(&file_path, rate, channels, limit, &superseded).map_err(|e| {
-            if superseded() { crate::audio::audit::CANCELLED.to_string() } else { e.to_string() }
+        let temp = crate::audio::audit::decode_to_temp_wav_with(&file_path, rate, channels, Some(limit), &cancelled).map_err(|e| {
+            if cancelled() { crate::audio::audit::CANCELLED.to_string() } else { e.to_string() }
         })?;
         let data = fs::read(&temp).map_err(|e| e.to_string());
         let _ = fs::remove_file(&temp);
         data.map(tauri::ipc::Response::new)
     })
     .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Stops preview decodes older than `request_id` (the page moved on to nothing).
-#[tauri::command]
-pub fn cancel_preview(request_id: u64) {
-    LATEST_PREVIEW.fetch_max(request_id, std::sync::atomic::Ordering::SeqCst);
+    .map_err(|e| e.to_string());
+    finish_preview(id);
+    result?
 }
 
 /// "Has this job been cancelled?" for work outside the conversion itself. A cancel

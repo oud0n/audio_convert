@@ -76,6 +76,8 @@ export function isElectron(): boolean {
 }
 
 let previewSeq = 0;
+// A random base keeps ids from a reloaded page apart from the previous page's.
+const previewBase = Math.floor(Math.random() * 2 ** 40) * 1000;
 
 /** GTK (Linux) matches filter patterns case-sensitively; other systems ignore case. */
 function pickerExtensions(extensions: string[]): string[] {
@@ -185,13 +187,13 @@ export class AppBridge {
     return { files: [], truncated: false };
   }
 
-  /** A new preview request id; ids only grow (also across page reloads). */
+  /** A new preview request id (unique for this page; used only to cancel that request). */
   static nextPreviewId(): number {
-    previewSeq = (previewSeq + 1) % 1000;
-    return Date.now() * 1000 + previewSeq;
+    previewSeq += 1;
+    return previewBase + previewSeq;
   }
 
-  /** Stops preview decodes started before `requestId` was made. */
+  /** Stops the preview decode with this id (now, or as soon as it starts). */
   static async cancelPreview(requestId: number): Promise<void> {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -199,7 +201,7 @@ export class AppBridge {
     }
   }
 
-  /** Decodes a file for the waveform/player; a newer request or cancel stops it. */
+  /** Decodes a file for the waveform/player; `cancelPreview(requestId)` stops it. */
   static async decodeAudioToWav(filePath: string, requestId?: number): Promise<ArrayBuffer> {
     if (isTauri()) {
       const { invoke } = await import('@tauri-apps/api/core');

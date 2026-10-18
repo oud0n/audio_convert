@@ -148,7 +148,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const activeConversionIdRef = useRef<string | null>(null);
   const activeConversionTabIdRef = useRef<string | null>(null);
   const jobRef = useRef<{ id: string; cancelled: boolean } | null>(null);
-  const batchRef = useRef({ id: '', success: 0, failed: 0, warnings: 0 });
+  const batchRef = useRef({ success: 0, failed: 0, warnings: 0 });
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
   useEffect(() => {
@@ -298,8 +298,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       });
     return () => {
       stale = true;
-      // Stop the backend decode too (a newer request would also stop it).
-      AppBridge.cancelPreview(AppBridge.nextPreviewId()).catch(() => {});
+      // Stop the backend decode too (no-op if it already finished).
+      AppBridge.cancelPreview(requestId).catch(() => {});
     };
   }, [selectedFileId, selectedPath, selectedHasBuffer]);
 
@@ -819,7 +819,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     }
 
     setIsConverting(true);
-    batchRef.current = { id: crypto.randomUUID(), success: 0, failed: 0, warnings: 0 };
+    batchRef.current = { success: 0, failed: 0, warnings: 0 };
     activeConversionTabIdRef.current = targetTabId;
     conversionQueueRef.current = queued.map((f) => f.id);
     
@@ -921,8 +921,6 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] ファイルをディスクに書き込み中...` : `[${fileRecord.name}] Writing file to disk...`, 'info');
         const saveResult = await AppBridge.saveConvertedFile({
           jobId: job.id,
-          // "Overwrite" never replaces an output written earlier in the same batch.
-          batchId: batchRef.current.id || undefined,
           settings: tabSettings,
           inputFilePath: fileRecord.path,
           fileName: finalExportName,
