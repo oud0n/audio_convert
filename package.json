@@ -4,6 +4,7 @@
   "description": "Audio Convert Application",
   "version": "1.2.0",
   "author": "oud0n",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",

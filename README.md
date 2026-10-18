@@ -1,6 +1,7 @@
 # Audio Convert
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-oud0n-FFDD00?style=flat&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/oud0n)
+![License](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-orange)
 
 [日本語 (Japanese)](#-日本語) | [English](#-english)
 
@@ -83,6 +84,17 @@ xrecode 互換の変換、ロスレスのビット一致検証、CUE 分割や D
 
 👉 **[Buy Me a Coffee で oud0n を支援する](https://buymeacoffee.com/oud0n)**
 
+### 📜 ライセンス
+
+[PolyForm Noncommercial License 1.0.0](LICENSE)（Copyright 2026 oud0n）
+
+- **非商用であれば自由に使えます**: 個人的な目的（趣味・学習・研究など、商用につながらないもの）での利用と、非営利団体・教育機関・公的な研究機関・政府機関での利用は、改変・再配布を含めて自由です。再配布するときは、`LICENSE`（またはライセンスの URL）と `Required Notice:` の行を一緒に渡してください。
+- **商用利用には事前の許諾が必要です**: 業務での利用、有償の製品・サービスへの組み込み、販売などを考えている方は、[caliber.trivia66@icloud.com](mailto:caliber.trivia66@icloud.com) までご連絡ください。
+- **改変版を公開・配布するときのお願い**: 出どころが分かるよう、次を守ってください。
+  - 本ソフトウェア（[oud0n/audio_convert](https://github.com/oud0n/audio_convert)）をもとにしていることと、改変したことを、README など利用者の目に入る場所に書く
+  - 改変版には別の名前を付け、本家の公式版・公認版と誤解されるような名前や表示を使わない
+- 同梱の FFmpeg（LGPL）と SoX（sox-dsd。GPL / LGPL）は別のプログラムで、それぞれのライセンスに従います（アプリの `licenses/` フォルダにライセンス文があります）。
+
 ---
 
 ## 🇺🇸 English
@@ -161,3 +173,14 @@ Your support, from the price of a coffee ($3 and up), keeps xrecode-compatible c
 In the app, use the "Support" button at the top right (on macOS also Help → 開発者を支援).
 
 👉 **[Support oud0n on Buy Me a Coffee](https://buymeacoffee.com/oud0n)**
+
+### 📜 License
+
+[PolyForm Noncommercial License 1.0.0](LICENSE) (Copyright 2026 oud0n)
+
+- **Free for non-commercial use**: personal use (hobby, study, research and other uses not leading to commercial gain) and use by non-profit organisations, educational institutions, public research organisations and government bodies is free, including modification and redistribution. When you redistribute, pass on `LICENSE` (or the license URL) and the `Required Notice:` line with it.
+- **Commercial use requires prior permission**: if you want to use it at work, include it in a paid product or service, or sell it, please contact [caliber.trivia66@icloud.com](mailto:caliber.trivia66@icloud.com).
+- **If you publish or distribute a modified version**, please make its origin clear:
+  - State, somewhere users will see it such as the README, that it is based on this software ([oud0n/audio_convert](https://github.com/oud0n/audio_convert)) and that you modified it.
+  - Give the modified version a different name, and do not use names or wording that could be mistaken for the official or an endorsed version.
+- The bundled FFmpeg (LGPL) and SoX (sox-dsd; GPL / LGPL) are separate programs under their own licenses (the license texts are in the app's `licenses/` folder).
