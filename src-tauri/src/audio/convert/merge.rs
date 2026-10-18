@@ -192,7 +192,6 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
     let float = sources.iter().any(|(_, s)| s.is_float);
     let bits = sources.iter().map(|(_, s)| s.bits_per_sample.unwrap_or(if s.lossless == Some(false) { 24 } else { 16 })).max().unwrap_or(16);
     let (sample_fmt, codec, ext) = if float || bits > 24 { (if float { "flt" } else { "s32" }, if float { "pcm_f32le" } else { "pcm_s32le" }, "wav") } else if bits > 16 { ("s32", "flac", "flac") } else { ("s16", "flac", "flac") };
-    let longest = sources.iter().map(|(_, s)| s.duration).fold(0.0, f64::max);
 
     let work = TempDir(std::env::temp_dir().join(format!("audio-convert-join-{}", uuid::Uuid::new_v4().simple())));
     fs::create_dir_all(&work.0).map_err(|e| e.to_string())?;
@@ -241,6 +240,14 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
         writer_args.extend(["-rf64".into(), "auto".into()]);
     }
     writer_args.push(joined.to_string_lossy().into_owned());
+    // Every input's channel count must be known: it decides the byte width of its stream.
+    let mut widths = Vec::new();
+    for (path, info) in &sources {
+        match info.channels {
+            Some(c) if c >= 1 => widths.push(c as usize),
+            _ => return Err(format!("Cannot tell how many channels {} has", path.display())),
+        }
+    }
     let mut writer = hidden_command(&ffmpeg)
         .args(&writer_args)
         .stdin(Stdio::piped())
@@ -249,12 +256,22 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
         .spawn()
         .map_err(|e| format!("Failed to start FFmpeg: {e}"))?;
     let mut sink = writer.stdin.take().ok_or("Failed to open FFmpeg's input")?;
+    // Drained on its own thread, so a talkative writer can never stall.
+    let writer_err = writer.stderr.take();
+    let writer_tail = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(mut e) = writer_err {
+            let _ = e.read_to_string(&mut text);
+        }
+        text
+    });
     let mut readers = Vec::new();
-    for ((path, _), f) in sources.iter().zip(&chains) {
+    for (((path, _), f), w) in sources.iter().zip(&chains).zip(&widths) {
         let spawned = hidden_command(&ffmpeg)
             .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-i"])
             .arg(path)
-            .args(["-map", "0:a:0", "-af", &f.join(","), "-f", raw, "-"])
+            // -ac pins the width even if the stream changes layout midway.
+            .args(["-map", "0:a:0", "-af", &f.join(","), "-ac", &w.to_string(), "-f", raw, "-"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -272,23 +289,25 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
             }
         }
     }
-    let widths: Vec<usize> = sources.iter().map(|(_, s)| s.channels.unwrap_or(1).max(1) as usize).collect();
     let result = (|| -> Result<(), String> {
         const FRAMES: usize = 4096;
         let mut outs: Vec<_> = readers.iter_mut().map(|r| r.stdout.take()).collect();
         let mut bufs: Vec<Vec<u8>> = widths.iter().map(|w| vec![0u8; FRAMES * w * size]).collect();
+        let mut read_total = vec![0u64; widths.len()];
         let frame_out = total as usize * size;
         let mut block = vec![0u8; FRAMES * frame_out];
         let mut done: u64 = 0;
+        let mut shown = -1i64;
         while done < longest_samples {
             ctx.check()?;
             let n = ((longest_samples - done) as usize).min(FRAMES);
-            for ((out, buf), w) in outs.iter_mut().zip(bufs.iter_mut()).zip(&widths) {
+            for (k, ((out, buf), w)) in outs.iter_mut().zip(bufs.iter_mut()).zip(&widths).enumerate() {
                 let want = n * w * size;
                 let got = match out.as_mut() {
                     Some(o) => read_full(o, &mut buf[..want]).map_err(|e| e.to_string())?,
                     None => 0,
                 };
+                read_total[k] += got as u64;
                 // Past an input's end: silence (zero is silence in every raw format here).
                 buf[got..want].fill(0);
             }
@@ -302,25 +321,53 @@ fn join_blocking(ctx: &JobCtx, request: &MergeRequest) -> Result<Merged, String>
             }
             sink.write_all(&block[..n * frame_out]).map_err(|e| format!("Cannot write the joined audio: {e}"))?;
             done += n as u64;
-            if longest > 0.0 {
-                ctx.emit("decoding", (done as f64 / longest_samples.max(1) as f64 * 100.0).min(99.0));
+            let percent = (done * 100 / longest_samples.max(1)) as i64;
+            if percent != shown {
+                shown = percent;
+                ctx.emit("decoding", (percent as f64).min(99.0));
+            }
+        }
+        // Each input must have given exactly the samples counted beforehand and ended
+        // cleanly: a decode that failed midway must not become silence.
+        for (k, out) in outs.iter_mut().enumerate() {
+            let mut extra = Vec::new();
+            if let Some(o) = out.as_mut() {
+                o.read_to_end(&mut extra).map_err(|e| e.to_string())?;
+            }
+            let expected = lengths[k] * (widths[k] * size) as u64;
+            if read_total[k] + extra.len() as u64 != expected {
+                return Err(format!("{} decoded to a different length than expected", sources[k].0.display()));
+            }
+        }
+        drop(outs);
+        for (k, r) in readers.iter_mut().enumerate() {
+            let status = r.wait().map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("Cannot decode {}", sources[k].0.display()));
             }
         }
         Ok(())
     })();
     drop(sink);
-    for r in readers.iter_mut() {
-        let _ = r.kill();
-        let _ = r.wait();
-    }
     if result.is_err() {
+        for r in readers.iter_mut() {
+            let _ = r.kill();
+            let _ = r.wait();
+        }
         let _ = writer.kill();
     }
-    let output = writer.wait_with_output().map_err(|e| e.to_string())?;
-    result?;
-    if !output.status.success() {
-        return Err(format!("Cannot write the joined audio: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    let status = writer.wait().map_err(|e| e.to_string())?;
+    let writer_text = writer_tail.join().unwrap_or_default();
+    // The writer's own message first: when it fails, our write only sees a broken pipe.
+    if !status.success() && !(result.is_err() && ctx.cancelled()) {
+        if let Err(e) = &result {
+            if !e.contains("Cannot write the joined audio") {
+                return Err(e.clone());
+            }
+        }
+        return Err(format!("Cannot write the joined audio: {}", writer_text.trim()));
     }
+    result?;
     ctx.check()?;
 
     // The joined channels are the point: an explicit channel setting does not apply.
