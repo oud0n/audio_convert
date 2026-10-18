@@ -128,6 +128,20 @@ export interface ConverterSettings {
   coverFormat?: 'keep' | 'jpeg' | 'png';
   saveCoverFile?: boolean; // also save folder.jpg next to the output
   dop?: boolean; // DSD sources to FLAC / WAV / AIFF as DoP (DSD over PCM)
+  tempoEnabled?: boolean; // tempo change keeping the pitch: speed = tempoTo / tempoFrom
+  tempoFrom?: number;
+  tempoTo?: number;
+  fadeEnabled?: boolean;
+  fadeInSeconds?: number;
+  fadeOutSeconds?: number;
+  padStartSeconds?: number; // silence added before the audio
+  padEndSeconds?: number; // silence added after the audio
+  splitBy?: 'off' | 'time' | 'silence'; // split each source into parts when converting
+  splitSeconds?: number;
+  splitThresholdDb?: number;
+  splitMinSilence?: number;
+  splitMinLength?: number;
+  splitPreservePauses?: boolean;
   replayGain?: 'off' | 'track' | 'album';
   tagReplaceEnabled?: boolean; // apply tagReplaceRules to the output tags (and names)
   tagReplaceRules?: string; // xrecode tagsreplace.txt format // write ReplayGain 2.0 / R128 tags (EBU R128 measured)

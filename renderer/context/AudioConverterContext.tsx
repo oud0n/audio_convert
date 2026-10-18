@@ -199,6 +199,20 @@ const defaultSettings: ConverterSettings = {
   coverFormat: 'keep',
   saveCoverFile: false,
   dop: false,
+  tempoEnabled: false,
+  tempoFrom: 25,
+  tempoTo: 23.976,
+  fadeEnabled: false,
+  fadeInSeconds: 0,
+  fadeOutSeconds: 3,
+  padStartSeconds: 0,
+  padEndSeconds: 0,
+  splitBy: 'off',
+  splitSeconds: 60,
+  splitThresholdDb: -50,
+  splitMinSilence: 1.5,
+  splitMinLength: 30,
+  splitPreservePauses: false,
   mergeOutput: false,
   mergeCreateCue: true,
   keepFolderLevels: 0,
@@ -991,21 +1005,58 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     const currentTab = tabs.find(t => t.id === targetTabId);
     if (!currentTab) return;
 
-    const queued = currentTab.files.filter((f) => f.status === 'queued' || f.status === 'failed');
+    let queued = currentTab.files.filter((f) => f.status === 'queued' || f.status === 'failed');
     if (queued.length === 0) {
       showToast('error', lang === 'ja' ? 'このタブには変換待ちのファイルがありません。' : 'No queued files to convert in this tab.');
       return;
     }
 
     setIsConverting(true);
-    batchRef.current = { success: 0, failed: 0, warnings: 0 };
     activeConversionTabIdRef.current = targetTabId;
+    let tabFiles = currentTab.files;
+    const split = currentTab.settings.splitBy ?? 'off';
+    if (split !== 'off' && AppBridge.isAvailable()) {
+      // Split each whole source into parts (rows like album-image tracks).
+      const s = currentTab.settings;
+      const replaced = new Map<string, AudioFile[]>();
+      for (const f of queued) {
+        if (f.imageGroup || f.trackStart !== undefined || !f.path) continue;
+        const res = await AppBridge.splitPoints({
+          path: f.path, mode: split, seconds: s.splitSeconds, thresholdDb: s.splitThresholdDb,
+          minSilence: s.splitMinSilence, minLength: s.splitMinLength, preservePauses: s.splitPreservePauses,
+        }).catch((e: any) => ({ success: false, tracks: [], missing: [], error: String(e?.message || e) }));
+        if (!res.success) {
+          addLogToTab(targetTabId, lang === 'ja' ? `[${f.name}] 分割位置を調べられませんでした: ${res.error}` : `[${f.name}] Cannot find split points: ${res.error}`, 'error');
+          continue;
+        }
+        if (res.tracks.length < 2) continue;
+        const meta: MetadataResult = {
+          success: true,
+          format: { duration: f.duration, sampleRate: f.sourceSampleRate ?? f.sampleRate, numberOfChannels: f.channels, bitrate: 0, lossless: f.sourceLossless },
+          tags: { ...f.tags, totalTracks: f.tags.totalTracks ?? '', totalDiscs: f.tags.totalDiscs ?? '' },
+        };
+        const stem = f.name.replace(/\.[^.]+$/, '');
+        const tracks = res.tracks.map(t => ({ ...t, title: f.tags.title ? `${f.tags.title} (${t.number})` : `${stem} (${t.number})` }));
+        const parts = imageTrackRecords(tracks, new Map([[f.path, meta]]), f.outputFormat, s.bitrate);
+        if (parts.length >= 2) replaced.set(f.id, parts);
+      }
+      if (replaced.size) {
+        const expand = (files: AudioFile[]) => files.flatMap(f => replaced.get(f.id) ?? [f]);
+        tabFiles = expand(tabFiles);
+        queued = expand(queued);
+        // Seen by the conversion steps before React renders.
+        tabsRef.current = tabsRef.current.map(t => t.id === targetTabId ? { ...t, files: expand(t.files) } : t);
+        setTabs(prev => prev.map(t => t.id === targetTabId ? { ...t, files: expand(t.files) } : t));
+        addLogToTab(targetTabId, lang === 'ja' ? `${replaced.size} 個のファイルを分割しました（${split === 'time' ? '時間' : '無音'}）。` : `Split ${replaced.size} files (by ${split}).`, 'info');
+      }
+    }
+    batchRef.current = { success: 0, failed: 0, warnings: 0 };
     conversionQueueRef.current = queued.map((f) => f.id);
     batchFileIdsRef.current = new Set(queued.map((f) => f.id));
     batchOutputsRef.current = [];
     jobCancelledRef.current = false;
     const groups = new Map<string, { path: string; cuePath?: string; ids: Set<string>; ready: Set<string> }>();
-    for (const f of currentTab.files) {
+    for (const f of tabFiles) {
       if (!f.imageGroup || !f.path) continue;
       const g = groups.get(f.imageGroup) ?? { path: f.path, cuePath: f.cuePath, ids: new Set<string>(), ready: new Set<string>() };
       g.ids.add(f.id);

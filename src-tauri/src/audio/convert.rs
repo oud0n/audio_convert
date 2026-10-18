@@ -91,6 +91,26 @@ pub struct ConverterSettings {
     pub save_cover_file: Option<bool>,
     /// DSD sources to FLAC / WAV / AIFF as DoP (the DSD bits packed in 24-bit PCM).
     pub dop: Option<bool>,
+    /// Tempo change keeping the pitch (xrecode tempo "by values"): the speed becomes
+    /// tempoTo / tempoFrom, e.g. 25 -> 23.976 for PAL speed-up.
+    #[serde(rename = "tempoEnabled")]
+    pub tempo_enabled: Option<bool>,
+    #[serde(rename = "tempoFrom")]
+    pub tempo_from: Option<f64>,
+    #[serde(rename = "tempoTo")]
+    pub tempo_to: Option<f64>,
+    /// Fade in / out lengths in seconds (0 = none).
+    #[serde(rename = "fadeEnabled")]
+    pub fade_enabled: Option<bool>,
+    #[serde(rename = "fadeInSeconds")]
+    pub fade_in_seconds: Option<f64>,
+    #[serde(rename = "fadeOutSeconds")]
+    pub fade_out_seconds: Option<f64>,
+    /// Silence added before / after the audio, in seconds.
+    #[serde(rename = "padStartSeconds")]
+    pub pad_start_seconds: Option<f64>,
+    #[serde(rename = "padEndSeconds")]
+    pub pad_end_seconds: Option<f64>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -141,6 +161,66 @@ pub fn track_range(start: Option<f64>, end: Option<f64>) -> Option<(f64, Option<
     let start = start.filter(|s| s.is_finite() && *s >= 0.0);
     let end = end.filter(|e| e.is_finite() && *e > start.unwrap_or(0.0));
     (start.is_some() || end.is_some()).then(|| (start.unwrap_or(0.0), end))
+}
+
+/// atempo factors whose product is `ratio` (each must be within 0.5 .. 2).
+pub fn atempo_chain(ratio: f64) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut r = ratio.clamp(0.01, 100.0);
+    while r > 2.0 {
+        out.push("atempo=2.0".to_string());
+        r /= 2.0;
+    }
+    while r < 0.5 {
+        out.push("atempo=0.5".to_string());
+        r /= 0.5;
+    }
+    if (r - 1.0).abs() > 1e-9 {
+        out.push(format!("atempo={r:.9}"));
+    }
+    out
+}
+
+/// Tempo, fades and added silence (only outside "same as source", like the other
+/// effects). The fade-out is placed from the known length, or from the end when
+/// silence trimming makes the length unknown.
+pub fn effect_filters(settings: &ConverterSettings, source: &SourceInfo) -> Vec<String> {
+    if same_as_source(settings) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut duration = source.duration;
+    if settings.tempo_enabled.unwrap_or(false) {
+        let (from, to) = (settings.tempo_from.unwrap_or(25.0), settings.tempo_to.unwrap_or(23.976));
+        if from > 0.0 && to > 0.0 {
+            let ratio = to / from;
+            out.extend(atempo_chain(ratio));
+            duration /= ratio;
+        }
+    }
+    if settings.fade_enabled.unwrap_or(false) {
+        let fin = settings.fade_in_seconds.unwrap_or(0.0).max(0.0);
+        let fout = settings.fade_out_seconds.unwrap_or(0.0).max(0.0);
+        if fin > 0.0 {
+            out.push(format!("afade=t=in:st=0:d={fin:.3}"));
+        }
+        if fout > 0.0 {
+            if settings.trim_silence.unwrap_or(false) || duration <= 0.0 {
+                out.extend(["areverse".to_string(), format!("afade=t=in:st=0:d={fout:.3}"), "areverse".to_string()]);
+            } else {
+                out.push(format!("afade=t=out:st={:.3}:d={fout:.3}", (duration - fout).max(0.0)));
+            }
+        }
+    }
+    let start = settings.pad_start_seconds.unwrap_or(0.0).max(0.0);
+    if start > 0.0 {
+        out.push(format!("adelay=delays={}:all=1", (start * 1000.0).round() as u64));
+    }
+    let end = settings.pad_end_seconds.unwrap_or(0.0).max(0.0);
+    if end > 0.0 {
+        out.push(format!("apad=pad_dur={end:.3}"));
+    }
+    out
 }
 
 /// FFmpeg filter cutting `range` (seconds) out of the input, sample-exact when the
@@ -874,6 +954,7 @@ pub fn pre_gain_filters(format: OutFormat, settings: &ConverterSettings, source:
         let trim = format!("silenceremove=start_periods=1:start_duration=0:start_threshold={db}dB:detection=peak:window=0.001");
         filters.extend([trim.clone(), "areverse".into(), trim, "areverse".into()]);
     }
+    filters.extend(effect_filters(settings, source));
     let (rate, channels) = target_shape(format, settings, source);
     // FFmpeg's resampler cannot convert from unnamed layouts (e.g. FL+FC). Relabel the
     // channels in their existing order with the standard layout for that count first.

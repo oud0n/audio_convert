@@ -161,6 +161,17 @@ export class AppBridge {
     return { success: true, tracks: [], missing: [] };
   }
 
+  /** Parts of a file split by time or by silence (as album-image tracks). */
+  static async splitPoints(request: {
+    path: string; mode: 'time' | 'silence'; seconds?: number; thresholdDb?: number; minSilence?: number; minLength?: number; preservePauses?: boolean;
+  }): Promise<ImageTracksResult> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke<ImageTracksResult>('split_points', { request });
+    }
+    return { success: false, tracks: [], missing: [], error: 'Needs the desktop app' };
+  }
+
   /** Native picker for audio files or folders (Tauri only; paths, not file contents). */
   static async pickAudioPaths(folders: boolean, extensions: string[]): Promise<string[]> {
     const { open } = await import('@tauri-apps/plugin-dialog');

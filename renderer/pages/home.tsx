@@ -1348,12 +1348,24 @@ export default function HomeDashboardPage() {
                           <span className="text-[10px] font-bold text-amber-500">({settings.normalizationTargetDb} dB)</span>
                         )}
                       </label>
-                      <label className="flex items-center gap-2 cursor-not-allowed opacity-30">
-                        <input type="checkbox" disabled className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500" />
+                      <label className={`flex items-center gap-2 ${settings.sameAsSource ? 'cursor-not-allowed' : 'cursor-pointer hover:text-zinc-200'}`}>
+                        <input
+                          type="checkbox"
+                          disabled={settings.sameAsSource}
+                          checked={settings.sameAsSource ? false : !!settings.tempoEnabled}
+                          onChange={(e) => updateSetting('tempoEnabled', e.target.checked)}
+                          className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500 cursor-pointer"
+                        />
                         <span>{t(lang, 'tempo')}</span>
                       </label>
-                      <label className="flex items-center gap-2 cursor-not-allowed opacity-30">
-                        <input type="checkbox" disabled className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500" />
+                      <label className={`flex items-center gap-2 ${settings.sameAsSource ? 'cursor-not-allowed' : 'cursor-pointer hover:text-zinc-200'}`}>
+                        <input
+                          type="checkbox"
+                          disabled={settings.sameAsSource}
+                          checked={settings.sameAsSource ? false : !!settings.fadeEnabled}
+                          onChange={(e) => updateSetting('fadeEnabled', e.target.checked)}
+                          className="rounded border-zinc-900 bg-zinc-900 accent-emerald-500 cursor-pointer"
+                        />
                         <span>{t(lang, 'fade')}</span>
                       </label>
                       <label className={`flex items-center gap-2 ${settings.sameAsSource ? 'cursor-not-allowed' : 'cursor-pointer hover:text-zinc-200'}`}>
@@ -1366,6 +1378,74 @@ export default function HomeDashboardPage() {
                         />
                         <span>{t(lang, 'trimSilence')}</span>
                       </label>
+                    </div>
+                    {!settings.sameAsSource && settings.tempoEnabled && (
+                      <div className="flex items-center gap-1.5 text-[10px] text-zinc-400" title={t(lang, 'tempoHelp')}>
+                        <span>{t(lang, 'tempo')}:</span>
+                        <input type="number" step={0.001} min={1} max={1000} value={settings.tempoFrom ?? 0}
+                          onChange={(e) => updateSetting('tempoFrom', Math.max(1, Math.min(1000, Number(e.target.value) || 0)))}
+                          className="w-16 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <span>→</span>
+                        <input type="number" step={0.001} min={1} max={1000} value={settings.tempoTo ?? 0}
+                          onChange={(e) => updateSetting('tempoTo', Math.max(1, Math.min(1000, Number(e.target.value) || 0)))}
+                          className="w-16 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <span className="text-zinc-500">×{((settings.tempoTo ?? 23.976) / (settings.tempoFrom || 25)).toFixed(4)}</span>
+                      </div>
+                    )}
+                    {!settings.sameAsSource && settings.fadeEnabled && (
+                      <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-zinc-400">
+                        <span>{t(lang, 'fadeIn')}</span>
+                        <input type="number" step={0.1} min={0} max={60} value={settings.fadeInSeconds ?? 0}
+                          onChange={(e) => updateSetting('fadeInSeconds', Math.max(0, Math.min(60, Number(e.target.value) || 0)))}
+                          className="w-14 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <span>{t(lang, 'fadeOut')}</span>
+                        <input type="number" step={0.1} min={0} max={60} value={settings.fadeOutSeconds ?? 0}
+                          onChange={(e) => updateSetting('fadeOutSeconds', Math.max(0, Math.min(60, Number(e.target.value) || 0)))}
+                          className="w-14 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <span>{t(lang, 'padStart')}</span>
+                        <input type="number" step={0.1} min={0} max={60} value={settings.padStartSeconds ?? 0}
+                          onChange={(e) => updateSetting('padStartSeconds', Math.max(0, Math.min(60, Number(e.target.value) || 0)))}
+                          className="w-14 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <span>{t(lang, 'padEnd')}</span>
+                        <input type="number" step={0.1} min={0} max={60} value={settings.padEndSeconds ?? 0}
+                          onChange={(e) => updateSetting('padEndSeconds', Math.max(0, Math.min(60, Number(e.target.value) || 0)))}
+                          className="w-14 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <span className="text-zinc-500">{t(lang, 'seconds')}</span>
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-zinc-400" title={t(lang, 'splitByHelp')}>
+                      <span>{t(lang, 'splitBy')}:</span>
+                      <select value={settings.splitBy ?? 'off'} onChange={(e) => updateSetting('splitBy', e.target.value as any)}
+                        className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300">
+                        <option value="off">{t(lang, 'splitOff')}</option>
+                        <option value="time">{t(lang, 'splitTime')}</option>
+                        <option value="silence">{t(lang, 'splitSilence')}</option>
+                      </select>
+                      {settings.splitBy === 'time' && (<>
+                        <input type="number" step={1} min={1} max={86400} value={settings.splitSeconds ?? 0}
+                          onChange={(e) => updateSetting('splitSeconds', Math.max(1, Math.min(86400, Number(e.target.value) || 0)))}
+                          className="w-16 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <span>{t(lang, 'seconds')}</span>
+                      </>)}
+                      {settings.splitBy === 'silence' && (<>
+                        <input type="number" step={1} min={-120} max={0} value={settings.splitThresholdDb ?? 0}
+                          onChange={(e) => updateSetting('splitThresholdDb', Math.max(-120, Math.min(0, Number(e.target.value) || 0)))}
+                          className="w-14 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <span>dB</span>
+                        <span>{t(lang, 'splitMinSilence')}</span>
+                        <input type="number" step={0.1} min={0.05} max={60} value={settings.splitMinSilence ?? 0}
+                          onChange={(e) => updateSetting('splitMinSilence', Math.max(0.05, Math.min(60, Number(e.target.value) || 0)))}
+                          className="w-14 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <span>{t(lang, 'splitMinLength')}</span>
+                        <input type="number" step={1} min={0} max={3600} value={settings.splitMinLength ?? 0}
+                          onChange={(e) => updateSetting('splitMinLength', Math.max(0, Math.min(3600, Number(e.target.value) || 0)))}
+                          className="w-14 bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300" />
+                        <label className="flex items-center gap-1 cursor-pointer">
+                          <input type="checkbox" checked={settings.splitPreservePauses ?? false} onChange={(e) => updateSetting('splitPreservePauses', e.target.checked)}
+                            className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer" />
+                          <span>{t(lang, 'splitPreservePauses')}</span>
+                        </label>
+                      </>)}
                     </div>
                     {/* Normalizer Target Adjustment */}
                     {settings.normalize && !settings.sameAsSource && (

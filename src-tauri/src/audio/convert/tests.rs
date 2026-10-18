@@ -32,6 +32,14 @@ fn settings(keep: bool) -> ConverterSettings {
         cover_format: None,
         save_cover_file: None,
         dop: None,
+        tempo_enabled: None,
+        tempo_from: None,
+        tempo_to: None,
+        fade_enabled: None,
+        fade_in_seconds: None,
+        fade_out_seconds: None,
+        pad_start_seconds: None,
+        pad_end_seconds: None,
     }
 }
 
@@ -752,6 +760,69 @@ fn dsd_sources_convert_to_pcm_dsf_and_dop() {
     ffmpeg(&["-f", "lavfi", "-i", "sine=duration=0.2", wav.to_str().unwrap()]);
     let err = convert_blocking(&ctx(), &request(&wav, &out, "DSF", "no")).unwrap_err();
     assert!(err.contains("DSD source"), "{err}");
+}
+
+#[test]
+fn tempo_fade_and_padding() {
+    assert_eq!(atempo_chain(23.976 / 25.0), ["atempo=0.959040000"]);
+    assert_eq!(atempo_chain(5.0), ["atempo=2.0", "atempo=2.0", "atempo=1.250000000"]);
+    assert!(atempo_chain(1.0).is_empty());
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let src = d.0.join("a.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=2", "-c:a", "pcm_s16le", src.to_str().unwrap()]);
+    let mut req = request(&src, &d.0.join("out"), "WAV", "fx");
+    let st = &mut req.settings;
+    st.same_as_source = Some(false);
+    st.sample_rate = Some(48000);
+    st.channels = Some(1);
+    st.tempo_enabled = Some(true);
+    st.tempo_from = Some(25.0);
+    st.tempo_to = Some(23.976);
+    st.fade_enabled = Some(true);
+    st.fade_in_seconds = Some(0.5);
+    st.fade_out_seconds = Some(0.5);
+    st.pad_start_seconds = Some(0.25);
+    st.pad_end_seconds = Some(0.5);
+    let (out, _) = convert_blocking(&ctx(), &req).unwrap();
+    let ff = get_ffmpeg_executable();
+    let dur = probe_source(&ff, &out).unwrap().duration;
+    let expected = 2.0 * 25.0 / 23.976 + 0.75;
+    assert!((dur - expected).abs() < 0.02, "{dur} vs {expected}");
+    // The first 0.25 s is silent and the faded start is quieter than the middle.
+    let level = |start: f64, len: f64| {
+        let o = hidden_command(&ff).args(["-ss", &start.to_string(), "-t", &len.to_string(), "-i"]).arg(&out).args(["-af", "volumedetect", "-f", "null", "-"]).output().unwrap();
+        parse_max_volume(&String::from_utf8_lossy(&o.stderr)).unwrap()
+    };
+    assert!(level(0.0, 0.2) < -80.0);
+    assert!(level(0.26, 0.05) < level(1.2, 0.05) - 10.0, "fade in");
+    assert!(level(expected - 0.45, 0.2) < -80.0, "padded end is silent");
+    // In "same as source" none of this applies.
+    req.settings.same_as_source = Some(true);
+    let (keep, _) = convert_blocking(&ctx(), &req).unwrap();
+    assert!((probe_source(&ff, &keep).unwrap().duration - 2.0).abs() < 0.01);
+}
+
+#[test]
+fn split_by_silence_and_time_finds_the_parts() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let src = d.0.join("two.wav");
+    ffmpeg(&["-f", "lavfi", "-i", "sine=duration=3", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono:d=2", "-f", "lavfi", "-i", "sine=duration=3",
+        "-filter_complex", "[0][1][2]concat=n=3:v=0:a=1", src.to_str().unwrap()]);
+    let req = |mode: &str| crate::audio::cue::SplitRequest {
+        path: src.to_string_lossy().into_owned(), mode: mode.into(), seconds: Some(3.0), threshold_db: Some(-50.0),
+        min_silence: Some(1.0), min_length: Some(1.0), preserve_pauses: Some(false),
+    };
+    let t = crate::audio::cue::split_tracks(&req("silence")).unwrap();
+    assert_eq!(t.len(), 2, "{t:?}");
+    assert!((t[0].end.unwrap() - 3.0).abs() < 0.05 && (t[1].start - 5.0).abs() < 0.05, "{t:?}");
+    let t = crate::audio::cue::split_tracks(&req("time")).unwrap();
+    assert_eq!(t.iter().map(|t| (t.start, t.end)).collect::<Vec<_>>(), [(0.0, Some(3.0)), (3.0, Some(6.0)), (6.0, None)]);
 }
 
 #[test]

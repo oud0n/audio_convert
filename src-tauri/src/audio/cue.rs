@@ -348,6 +348,134 @@ pub async fn read_image_tracks_command(path: String) -> ImageTracksResponse {
         .unwrap_or_else(|e| ImageTracksResponse { error: Some(e.to_string()), ..Default::default() })
 }
 
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct SplitRequest {
+    pub path: String,
+    /// "time" or "silence".
+    pub mode: String,
+    /// "time": length of each part in seconds.
+    pub seconds: Option<f64>,
+    /// "silence": level below which audio counts as silence (dB), minimum silence
+    /// length, minimum part length (shorter parts join the next one), and whether the
+    /// silence stays (split in its middle) or is dropped.
+    #[serde(rename = "thresholdDb")]
+    pub threshold_db: Option<f64>,
+    #[serde(rename = "minSilence")]
+    pub min_silence: Option<f64>,
+    #[serde(rename = "minLength")]
+    pub min_length: Option<f64>,
+    #[serde(rename = "preservePauses")]
+    pub preserve_pauses: Option<bool>,
+}
+
+/// "silence_start: 12.3" / "silence_end: 14.1 | silence_duration: 1.8" from silencedetect.
+pub fn parse_silences(log: &str) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for line in log.lines() {
+        if let Some(v) = line.split("silence_start: ").nth(1) {
+            start = v.split_whitespace().next().and_then(|t| t.parse::<f64>().ok());
+        } else if let Some(v) = line.split("silence_end: ").nth(1) {
+            if let (Some(s), Some(e)) = (start.take(), v.split_whitespace().next().and_then(|t| t.parse::<f64>().ok())) {
+                out.push((s.max(0.0), e));
+            }
+        }
+    }
+    out
+}
+
+/// Parts of a file of `duration` seconds between `silences` (start, end): each part
+/// ends where a silence starts and the next begins where it ends (or both at its middle
+/// with `preserve`). Parts shorter than `min_length` join the next part.
+pub fn parts_from_silences(duration: f64, silences: &[(f64, f64)], min_length: f64, preserve: bool) -> Vec<(f64, Option<f64>)> {
+    let mut cuts: Vec<(f64, f64)> = Vec::new(); // (end of a part, start of the next)
+    for &(s, e) in silences {
+        // Silence at the very start or end is not a split.
+        if s <= 0.01 || e >= duration - 0.01 {
+            continue;
+        }
+        cuts.push(if preserve { ((s + e) / 2.0, (s + e) / 2.0) } else { (s, e) });
+    }
+    let mut parts = Vec::new();
+    let mut start = 0.0;
+    for (end, next) in cuts {
+        if end - start < min_length {
+            continue; // too short: keep going until the next cut
+        }
+        parts.push((start, Some(end)));
+        start = next;
+    }
+    // A short last part joins the previous one.
+    if let Some(last) = parts.last_mut() {
+        if duration - start < min_length {
+            last.1 = None;
+            return parts;
+        }
+    }
+    parts.push((start, None));
+    parts
+}
+
+pub fn split_tracks(request: &SplitRequest) -> Result<Vec<ImageTrack>, String> {
+    let path = Path::new(&request.path);
+    let ffmpeg = get_ffmpeg_executable();
+    let info = crate::audio::convert::probe_source(&ffmpeg, path)?;
+    let duration = info.duration;
+    if duration <= 0.0 {
+        return Err("Unknown length".into());
+    }
+    let parts: Vec<(f64, Option<f64>)> = match request.mode.as_str() {
+        "time" => {
+            let step = request.seconds.unwrap_or(60.0).max(1.0);
+            let mut v = Vec::new();
+            let mut t = 0.0;
+            while t < duration - 0.01 {
+                let end = t + step;
+                v.push((t, (end < duration - 0.01).then_some(end)));
+                t = end;
+            }
+            v
+        }
+        "silence" => {
+            let db = request.threshold_db.unwrap_or(-50.0);
+            let min_silence = request.min_silence.unwrap_or(1.5).max(0.05);
+            let output = hidden_command(&ffmpeg)
+                .args(["-nostdin", "-hide_banner", "-nostats", "-i"])
+                .arg(path)
+                .args(["-map", "0:a:0", "-af", &format!("silencedetect=n={db}dB:d={min_silence}"), "-f", "null", "-"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .output()
+                .map_err(|e| e.to_string())?;
+            let silences = parse_silences(&String::from_utf8_lossy(&output.stderr));
+            parts_from_silences(duration, &silences, request.min_length.unwrap_or(30.0).max(0.0), request.preserve_pauses.unwrap_or(false))
+        }
+        other => return Err(format!("Unknown split mode: {other}")),
+    };
+    let total = parts.len().to_string();
+    Ok(parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, (start, end))| ImageTrack {
+            audio_path: request.path.clone(),
+            number: i as u32 + 1,
+            start,
+            end,
+            total_tracks: total.clone(),
+            ..Default::default()
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn split_points(request: SplitRequest) -> ImageTracksResponse {
+    tauri::async_runtime::spawn_blocking(move || split_tracks(&request))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r)
+        .map_or_else(|e| ImageTracksResponse { error: Some(e), ..Default::default() }, |tracks| ImageTracksResponse { success: true, tracks, ..Default::default() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +510,21 @@ mod tests {
         assert_eq!(decode_cue_text("\u{feff}曲".as_bytes()), "曲");
         assert_eq!(msf("01:02:74"), Some(62.0 + 74.0 / 75.0));
         assert_eq!(msf("01:60:00"), None);
+    }
+
+    #[test]
+    fn silence_parts() {
+        let log = "[silencedetect @ 0x1] silence_start: 59.5\n[silencedetect @ 0x1] silence_end: 61.5 | silence_duration: 2\n[silencedetect @ 0x1] silence_start: 100\n[silencedetect @ 0x1] silence_end: 101.6 | silence_duration: 1.6\n[silencedetect @ 0x1] silence_start: 178\n[silencedetect @ 0x1] silence_end: 180 | silence_duration: 2\n";
+        let s = parse_silences(log);
+        assert_eq!(s, [(59.5, 61.5), (100.0, 101.6), (178.0, 180.0)]);
+        // The trailing silence is not a split; 61.5..100 is long enough.
+        assert_eq!(parts_from_silences(180.0, &s, 30.0, false), [(0.0, Some(59.5)), (61.5, Some(100.0)), (101.6, None)]);
+        assert_eq!(parts_from_silences(180.0, &s, 30.0, true), [(0.0, Some(60.5)), (60.5, Some(100.8)), (100.8, None)]);
+        // 61.5..100 is under 60 s: it joins the next part.
+        assert_eq!(parts_from_silences(180.0, &s, 60.0, false), [(0.0, Some(100.0)), (101.6, None)]);
+        // A short last part joins the previous one.
+        assert_eq!(parts_from_silences(120.0, &[(100.0, 101.0)], 30.0, false), [(0.0, None)]);
+        assert_eq!(parts_from_silences(50.0, &[], 30.0, false), [(0.0, None)]);
     }
 
     #[test]
