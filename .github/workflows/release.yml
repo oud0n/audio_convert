@@ -97,5 +97,7 @@ jobs:
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/rpm/*.rpm
+            ${{ runner.temp }}/sox/sox-dsd-*.tar.gz
+            scripts/build-sox.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

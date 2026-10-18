@@ -77,3 +77,4 @@ jobs:
           path: |
             ${{ runner.temp }}/sox/out/bin/sox*
             ${{ runner.temp }}/sox/out/SOX-LICENSE.txt
+            ${{ runner.temp }}/sox/out/sox-dsd-*.tar.gz

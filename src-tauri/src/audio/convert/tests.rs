@@ -1019,15 +1019,15 @@ fn very_short_sources_convert_to_every_format() {
 
 #[test]
 fn sox_dsd_arguments_and_progress() {
-    let args = dsd::sox_dsd_args(44100, 2, 64, "sdm-8", Path::new("o.dsf"));
+    let args = dsd::sox_dsd_args(44100, 2, 64, "sdm-8");
     let line = args.join(" ");
     assert!(line.contains("-r 44100 -c 2 -"), "{line}");
-    assert!(line.ends_with("-t dsf o.dsf rate -v 2822400 sdm -f sdm-8"), "{line}");
-    assert!(dsd::sox_dsd_args(96000, 1, 256, "clans-6", Path::new("o.dsf")).join(" ").ends_with("rate -v 11289600 sdm -f clans-6"));
+    assert!(line.ends_with("-t dsf - rate -v 2822400 sdm -f sdm-8"), "{line}");
+    assert!(dsd::sox_dsd_args(96000, 1, 256, "clans-6").join(" ").ends_with("rate -v 11289600 sdm -f clans-6"));
     // Unknown values fall back to DSD64 / sdm-8.
-    assert!(dsd::sox_dsd_args(44100, 2, 7, "bogus; rm", Path::new("o.dsf")).join(" ").ends_with("rate -v 2822400 sdm -f sdm-8"));
-    assert_eq!(dsd::sox_progress("\rIn:3.20% 00:00:01.00 [00:00:30.00] Out:0\rIn:45.67% 00:00:02"), Some(45.67));
-    assert_eq!(dsd::sox_progress("nothing"), None);
+    assert!(dsd::sox_dsd_args(44100, 2, 7, "bogus; rm").join(" ").ends_with("rate -v 2822400 sdm -f sdm-8"));
+    assert_eq!(dsd::sox_progress_seconds("\rIn:0.00% 00:00:01.00 [00:00:00.00] Out:0\rIn:0.00% 00:01:02.50 [00:00:00.00]"), Some(62.5));
+    assert_eq!(dsd::sox_progress_seconds("nothing"), None);
 }
 
 /// SoX-dependent tests skip when SoX is missing, except with REQUIRE_FFMPEG (CI).
@@ -1063,7 +1063,7 @@ fn pcm_sources_become_dsd() {
     assert_eq!((ch, rate), (2, 2_822_400));
     // The quality check compares at the source rate: a clean conversion is not degraded.
     let r = crate::audio::audit::verify_quality_blocking(&src.to_string_lossy(), &dsf.to_string_lossy(), false, &|| false).result.unwrap();
-    assert_ne!(r.status, "degraded", "{} {:?}", r.summary_message, r.details);
+    assert_eq!(r.status, "passed", "{} {:?}", r.summary_message, r.details);
     assert!(r.correlation_percent.unwrap() > 99.0, "{:?}", r.correlation_percent);
 
     // DSD128 with another filter, a track range, mono.
@@ -1077,6 +1077,16 @@ fn pcm_sources_become_dsd() {
     let info = probe_source(&ff, &dsf128).unwrap();
     assert_eq!((info.sample_rate, info.channels), (Some(705600), Some(1)));
     assert!((info.duration - 1.0).abs() < 0.05, "{}", info.duration);
+
+    // Broadband music-like audio after a silent lead-in passes the check (the delay and
+    // level are measured on the non-silent part, at the DSD's decode rate).
+    let pink = d.0.join("pink.flac");
+    ffmpeg(&["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo:d=2.5", "-f", "lavfi", "-i", "anoisesrc=color=pink:r=44100:a=0.3:d=3",
+        "-filter_complex", "[1]aformat=channel_layouts=stereo[n];[0][n]concat=n=2:v=0:a=1", "-c:a", "flac", pink.to_str().unwrap()]);
+    let (pink_dsf, _) = convert_blocking(&ctx(), &request(&pink, &out, "DSF", "pink")).unwrap();
+    let r = crate::audio::audit::verify_quality_blocking(&pink.to_string_lossy(), &pink_dsf.to_string_lossy(), false, &|| false).result.unwrap();
+    assert_eq!(r.status, "passed", "{} {:?}", r.summary_message, r.details);
+    assert!(r.correlation_percent.unwrap() > 99.5, "{:?}", r.correlation_percent);
 
     // More channels than DSF holds.
     let eight = d.0.join("eight.wav");

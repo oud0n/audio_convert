@@ -370,10 +370,11 @@ pub fn dop_matches(original: &Path, converted: &Path, cancelled: &dyn Fn() -> bo
 pub const SDM_FILTERS: &[&str] = &["sdm-4", "sdm-5", "sdm-6", "sdm-7", "sdm-8", "clans-4", "clans-5", "clans-6", "clans-7", "clans-8"];
 
 /// The SoX arguments that read `rate` Hz, `channels`-channel f32 PCM on stdin and write
-/// DSD (64/128/256 x 44.1 kHz) as a DSF file. sdm maps 0 dBFS to 50 % modulation (the
-/// SACD level), so the DSD decodes 6 dB below the PCM. (SoX's -G guard must not be used:
-/// with the 1-bit output it ruins the file.)
-pub fn sox_dsd_args(rate: u32, channels: u32, dsd_multiple: u32, filter: &str, output: &Path) -> Vec<String> {
+/// DSD (64/128/256 x 44.1 kHz) as DSF to stdout (the app gives SoX the output file as
+/// stdout, so non-ASCII paths never pass through a narrow Windows argv). sdm maps 0 dBFS
+/// to 50 % modulation (the SACD level), so the DSD decodes 6 dB below the PCM. (SoX's -G
+/// guard must not be used: with the 1-bit output it ruins the file.)
+pub fn sox_dsd_args(rate: u32, channels: u32, dsd_multiple: u32, filter: &str) -> Vec<String> {
     let multiple = match dsd_multiple {
         128 | 256 => dsd_multiple,
         _ => 64,
@@ -383,23 +384,54 @@ pub fn sox_dsd_args(rate: u32, channels: u32, dsd_multiple: u32, filter: &str, o
         "-S".into(), "-V2".into(),
         "-t".into(), "raw".into(), "-e".into(), "floating-point".into(), "-b".into(), "32".into(), "-L".into(),
         "-r".into(), rate.to_string(), "-c".into(), channels.to_string(), "-".into(),
-        "-t".into(), "dsf".into(), output.to_string_lossy().into_owned(),
+        "-t".into(), "dsf".into(), "-".into(),
         "rate".into(), "-v".into(), (44_100 * multiple).to_string(),
         "sdm".into(), "-f".into(), filter.into(),
     ]
 }
 
-/// "In:12.34%" in SoX's -S progress output (the last one in `text`).
-pub fn sox_progress(text: &str) -> Option<f64> {
+/// Seconds of input SoX has read, from its -S progress line ("In:0.00% 00:01:02.35 ...";
+/// the percentage stays 0 for a raw pipe of unknown length).
+pub fn sox_progress_seconds(text: &str) -> Option<f64> {
     let at = text.rfind("In:")?;
-    let rest = &text[at + 3..];
-    let end = rest.find('%')?;
-    rest[..end].trim().parse().ok()
+    let time = text[at..].split_whitespace().nth(1)?;
+    let mut parts = time.split(':').map(|p| p.parse::<f64>());
+    let (h, m, s) = (parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?);
+    Some(h * 3600.0 + m * 60.0 + s)
 }
 
-/// PCM (any source FFmpeg reads) to a DSF file: FFmpeg decodes with the usual cut,
-/// channel and effect filters to f32 on a pipe, SoX resamples to the DSD rate and
-/// modulates with sox-dsd's sigma-delta modulator. Cancelling kills both.
+/// Writes `tags` into a DSF file in place: the ID3v2 tag goes at the end (replacing one
+/// that is there) and the header's file size and metadata pointer are updated.
+pub fn set_dsf_tags(path: &Path, tags: &TagMap) -> Result<(), String> {
+    let io = |e: std::io::Error| format!("Cannot tag the DSF file: {e}");
+    let mut file = OpenOptions::new().read(true).write(true).open(path).map_err(io)?;
+    let mut head = [0u8; 28];
+    file.read_exact(&mut head).map_err(io)?;
+    if &head[..4] != b"DSD " {
+        return Err("Not a DSF file".into());
+    }
+    let len = file.metadata().map_err(io)?.len();
+    let pointer = read_u64le(&head[20..]);
+    // Audio ends where an old tag starts (or at the end of the file).
+    let audio_end = if pointer > 0 && pointer < len { pointer } else { len };
+    file.set_len(audio_end).map_err(io)?;
+    let id3 = build_id3v23(tags).unwrap_or_default();
+    file.seek(SeekFrom::Start(audio_end)).map_err(io)?;
+    file.write_all(&id3).map_err(io)?;
+    let total = audio_end + id3.len() as u64;
+    file.seek(SeekFrom::Start(12)).map_err(io)?;
+    file.write_all(&total.to_le_bytes()).map_err(io)?;
+    file.write_all(&(if id3.is_empty() { 0 } else { audio_end }).to_le_bytes()).map_err(io)?;
+    file.sync_all().map_err(io)
+}
+
+/// Gain (dB) applied before the modulator so the resampler's inter-sample peaks of a loud
+/// master are not clipped (SoX's integer `rate` stage clips at full scale).
+pub const DSD_HEADROOM_DB: f64 = 1.0;
+
+/// PCM (any source FFmpeg reads) to a DSF file at `output`: FFmpeg decodes with the
+/// usual cut, channel and effect filters to f32 on a pipe, SoX resamples to the DSD rate
+/// and modulates with sox-dsd's sigma-delta modulator. Cancelling kills both.
 pub(super) fn pcm_to_dsf(
     ctx: &JobCtx,
     ffmpeg: &Path,
@@ -416,17 +448,21 @@ pub(super) fn pcm_to_dsf(
         return Err(format!("DSF holds at most 6 channels (the source has {channels})"));
     }
     let mut filters = pre_gain_filters(OutFormat::Dsf, settings, source);
-    if let Some(g) = gain_db.filter(|g| !same_as_source(settings) && g.is_finite() && *g != 0.0) {
-        filters.push(format!("volume={g:.4}dB"));
+    let gain = gain_db.filter(|g| !same_as_source(settings) && g.is_finite()).unwrap_or(0.0) - DSD_HEADROOM_DB;
+    filters.push(format!("volume={gain:.4}dB"));
+    // Channels in their order: relabelled (never remixed) when the count is unchanged,
+    // so a 2.1 or 4.0 source keeps every channel. Always the rate SoX is told.
+    if source.channels == Some(channels) {
+        filters.push(format!("channelmap=channel_layout={}", layout_name(channels)));
     }
-    // A fixed layout for the channel count, so SoX gets exactly `channels` channels.
-    filters.push(format!("aformat=sample_fmts=flt:channel_layouts={}", layout_name(channels)));
+    filters.push(format!("aresample={rate},aformat=sample_fmts=flt:channel_layouts={}", layout_name(channels)));
     let mut decode: Vec<String> = vec!["-nostdin".into(), "-v".into(), "error".into(), "-i".into(), input.to_string_lossy().into_owned(), "-map".into(), "0:a:0".into()];
     decode.extend(["-af".into(), filters.join(",")]);
     decode.extend(["-c:a".into(), "pcm_f32le".into(), "-f".into(), "f32le".into(), "-".into()]);
 
     ctx.check()?;
     ctx.emit("converting", 0.0);
+    let out_file = File::create(output).map_err(|e| format!("Cannot create the DSD file: {e}"))?;
     let mut decoder = hidden_command(ffmpeg)
         .args(&decode)
         .stdin(Stdio::null())
@@ -438,9 +474,9 @@ pub(super) fn pcm_to_dsf(
     let sox = crate::audio::audit::get_sox_executable();
     let filter = settings.dsd_filter.as_deref().unwrap_or("sdm-8");
     let mut modulator = match hidden_command(&sox)
-        .args(sox_dsd_args(rate, channels, settings.dsd_rate.unwrap_or(64), filter, output))
+        .args(sox_dsd_args(rate, channels, settings.dsd_rate.unwrap_or(64), filter))
         .stdin(Stdio::from(pcm))
-        .stdout(Stdio::null())
+        .stdout(Stdio::from(out_file))
         .stderr(Stdio::piped())
         .spawn()
     {
@@ -464,6 +500,7 @@ pub(super) fn pcm_to_dsf(
     });
     let sox_err = modulator.stderr.take();
     let progress_ctx = ctx.clone();
+    let duration = source.duration;
     let sox_tail = std::thread::spawn(move || {
         let mut tail = String::new();
         if let Some(mut e) = sox_err {
@@ -473,8 +510,10 @@ pub(super) fn pcm_to_dsf(
                     break;
                 }
                 tail.push_str(&String::from_utf8_lossy(&buf[..n]));
-                if let Some(p) = sox_progress(&tail) {
-                    progress_ctx.emit("converting", p.clamp(0.0, 99.0));
+                if duration > 0.0 {
+                    if let Some(done) = sox_progress_seconds(&tail) {
+                        progress_ctx.emit("converting", (done / duration * 100.0).clamp(0.0, 99.0));
+                    }
                 }
                 if tail.len() > 16384 {
                     tail.drain(..tail.len() - 4096);
@@ -500,9 +539,12 @@ pub(super) fn pcm_to_dsf(
                 let _ = modulator.wait();
                 return Err(format!("PCM to DSD did not finish: {e}"));
             }
+            // One side failed: the other would wait (SoX for input) or keep decoding.
             (Ok(Some(d)), Ok(None)) if !d.success() => {
-                // The decoder failed: SoX would wait for more input forever otherwise.
                 let _ = modulator.kill();
+            }
+            (Ok(None), Ok(Some(m))) if !m.success() => {
+                let _ = decoder.kill();
             }
             _ => {}
         }
@@ -513,14 +555,16 @@ pub(super) fn pcm_to_dsf(
     if cancelled {
         return Err("Conversion cancelled".into());
     }
-    if !decode_status.success() {
-        let last = ffmpeg_text.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" / ");
-        return Err(format!("Cannot decode the source: {last}"));
-    }
+    let last_lines = |text: &str, skip_progress: bool| -> String {
+        let lines: Vec<&str> = text.split(['\n', '\r']).map(str::trim).filter(|l| !l.is_empty() && !(skip_progress && l.starts_with("In:"))).collect();
+        lines.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join(" / ")
+    };
+    // SoX first: when it fails, FFmpeg only sees a broken pipe.
     if !modulate_status.success() {
-        let last: Vec<&str> = sox_text.split(['\n', '\r']).map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("In:")).collect();
-        let last = last.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join(" / ");
-        return Err(format!("SoX could not write DSD: {last}"));
+        return Err(format!("SoX could not write DSD: {}", last_lines(&sox_text, true)));
+    }
+    if !decode_status.success() {
+        return Err(format!("Cannot decode the source: {}", last_lines(&ffmpeg_text, false)));
     }
     Ok(())
 }

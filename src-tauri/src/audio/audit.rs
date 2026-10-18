@@ -360,44 +360,57 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(filled)
 }
 
-/// Streams both files (the original remixed / resampled to the converted file's channel
-/// count and rate) and compares them sample by sample. The first 250 frames are left
-/// out when there is more (encoder start-up), as before.
-/// The delay (in samples at `rate`) of `converted` against `original`, found by
-/// cross-correlating the first two seconds of the first channel (within +-64 samples).
-fn best_lag(original: &str, converted: &str, original_filters: Option<&str>, converted_filters: Option<&str>, rate: Option<u32>) -> i64 {
-    let rate = rate.unwrap_or(44100);
-    let decode = |path: &str, filters: Option<&str>| -> Vec<f32> {
-        let mut chain: Vec<String> = filters.map(str::to_string).into_iter().collect();
-        chain.push(format!("aresample={rate}"));
-        chain.push("pan=mono|c0=c0".into());
+/// How `converted` (DSD made from PCM) lines up with `original`, both decoded through
+/// their filter chains at `rate`: the delay in samples (positive = converted is later)
+/// and the gain that brings it to the original's level. Found on one second of the first
+/// channel starting at the first non-silent sample (within 30 s), by normalized
+/// cross-correlation over +-256 samples; no clear match gives no shift and the nominal
+/// DSD level.
+fn dsd_alignment(original: &str, converted: &str, original_chain: &str, converted_chain: &str, rate: u32) -> (i64, f64) {
+    // 0 dBFS PCM is 50 % modulation (-6.02 dB) and the encoder leaves 1 dB of headroom.
+    let nominal = 2.0 * 10f64.powf(crate::audio::convert::dsd::DSD_HEADROOM_DB / 20.0);
+    let decode = |path: &str, chain: &str| -> Vec<f32> {
+        let af = format!("{chain},pan=mono|c0=c0");
         let out = crate::audio::convert::hidden_command(&get_ffmpeg_executable())
-            .args(["-v", "error", "-nostdin", "-i", path, "-map", "0:a:0", "-af", &chain.join(","), "-t", "2", "-c:a", "pcm_f32le", "-f", "f32le", "-"])
+            .args(["-v", "error", "-nostdin", "-i", path, "-map", "0:a:0", "-af", &af, "-t", "30", "-c:a", "pcm_f32le", "-f", "f32le", "-"])
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .output();
         out.map(|o| o.stdout.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()).unwrap_or_default()
     };
-    let a = decode(original, original_filters);
-    let b = decode(converted, converted_filters);
-    const MAX: i64 = 64;
-    let n = a.len().min(b.len()) as i64;
-    if n < 4 * MAX {
-        return 0;
+    let a = decode(original, original_chain);
+    let b = decode(converted, converted_chain);
+    const MAX: usize = 256;
+    let Some(first) = a.iter().position(|x| x.abs() > 1e-3) else { return (0, nominal) };
+    let start = first.max(MAX);
+    let end = (start + rate as usize).min(a.len()).min(b.len().saturating_sub(MAX));
+    if end <= start + 4 * MAX {
+        return (0, nominal);
     }
-    let mut best = (0i64, f64::MIN);
-    for lag in -MAX..=MAX {
-        let mut sum = 0.0f64;
-        for i in MAX..n - MAX {
-            sum += f64::from(a[i as usize]) * f64::from(b[(i + lag) as usize]);
+    let energy_a: f64 = a[start..end].iter().map(|x| f64::from(*x).powi(2)).sum();
+    let mut best = (0i64, f64::MIN, 0.0f64, 0.0f64);
+    for lag in -(MAX as i64)..=(MAX as i64) {
+        let (mut ab, mut bb) = (0.0f64, 0.0f64);
+        for i in start..end {
+            let y = f64::from(b[(i as i64 + lag) as usize]);
+            ab += f64::from(a[i]) * y;
+            bb += y * y;
         }
-        if sum > best.1 {
-            best = (lag, sum);
+        let score = if bb > 0.0 { ab / (energy_a * bb).sqrt() } else { 0.0 };
+        if score > best.1 {
+            best = (lag, score, ab, bb);
         }
     }
-    best.0
+    let (lag, score, ab, bb) = best;
+    if score < 0.3 || bb <= 0.0 {
+        return (0, nominal);
+    }
+    (lag, (ab / bb).clamp(0.5, 8.0))
 }
 
+/// Streams both files (the original remixed / resampled to the converted file's channel
+/// count and rate) and compares them sample by sample. The first 250 frames are left
+/// out when there is more (encoder start-up), as before.
 fn compare_files(
     original: &str,
     converted: &str,
@@ -410,37 +423,39 @@ fn compare_files(
     let channels = out.channels.unwrap_or(2).max(1) as usize;
     let src_channels = if channel.is_some() { Some(1) } else { src.channels };
     let remix = out.channels.filter(|c| src_channels != Some(*c));
-    // PCM made into DSD: the DSD (decoded with its ultrasonic shaped noise) is brought
-    // back to the source's rate, which also filters that noise away, and compared there.
+    // PCM made into DSD: compared at the DSD's decode rate (352.8 kHz, or the source's
+    // if higher), with the same steep low-pass (8 poles at 20 kHz) on both sides at that
+    // rate, so the shaped ultrasonic noise is left out and both filters match; the
+    // modulator's delay and the DSD level are measured and taken out.
     let dsd_from_pcm = crate::audio::convert::dsd::is_dsd_codec(out.codec.as_deref())
         && !crate::audio::convert::dsd::is_dsd_codec(src.codec.as_deref());
-    let compare_rate = if dsd_from_pcm { src.sample_rate } else { out.sample_rate };
+    let dsd_rate = src.sample_rate.unwrap_or(44_100).max(352_800);
+    let compare_rate = if dsd_from_pcm { Some(dsd_rate) } else { out.sample_rate };
     let resample = if dsd_from_pcm { None } else { out.sample_rate.filter(|r| src.sample_rate != Some(*r)) };
-    let converted_resample = if dsd_from_pcm { src.sample_rate } else { None };
-    // DSD's shaped noise rises right above the audio band at nearly full scale: both sides
-    // get the same steep low-pass (8 poles at 20 kHz) so only the music is compared, and
-    // the DSD's 50 % modulation (SACD level, -6 dB decoded) is brought back to full.
-    let band = if dsd_from_pcm { Some("lowpass=f=20000,lowpass=f=20000,lowpass=f=20000,lowpass=f=20000".to_string()) } else { None };
-    let trim = Some(part_filters(range, channel, src.sample_rate).join(",")).filter(|f| !f.is_empty());
-    let trim = match (trim, &band) {
-        (Some(t), Some(b)) => Some(format!("{t},{b}")),
-        (t, b) => t.or(b.clone()),
-    };
-    let mut converted_filters = band.map(|b| format!("{b},volume=6.0206dB"));
-    let mut trim = trim;
+    let mut trim = Some(part_filters(range, channel, src.sample_rate).join(",")).filter(|f| !f.is_empty());
+    let mut converted_filters = None;
     if dsd_from_pcm {
-        // The modulator and the DSD decoder delay the audio by a few samples: align the
-        // two before comparing them sample by sample.
-        let lag = best_lag(original, converted, trim.as_deref(), converted_filters.as_deref(), compare_rate);
-        if lag > 0 {
-            let f = converted_filters.take().unwrap_or_default();
-            converted_filters = Some(format!("{f},aresample={},atrim=start_sample={lag},asetpts=N/SR/TB", compare_rate.unwrap_or(44100)));
-        } else if lag < 0 {
-            trim = Some(format!("{},atrim=start_sample={},asetpts=N/SR/TB", trim.unwrap_or_else(|| "anull".into()), -lag));
+        const BAND: &str = "lowpass=f=20000,lowpass=f=20000,lowpass=f=20000,lowpass=f=20000";
+        let mut original_chain: Vec<String> = trim.take().into_iter().collect();
+        original_chain.push(crate::audio::convert::resample_filter(dsd_rate));
+        original_chain.push(BAND.into());
+        let mut converted_chain: Vec<String> = Vec::new();
+        if out.sample_rate != Some(dsd_rate) {
+            converted_chain.push(crate::audio::convert::resample_filter(dsd_rate));
         }
+        converted_chain.push(BAND.into());
+        let (lag, gain) = dsd_alignment(original, converted, &original_chain.join(","), &converted_chain.join(","), dsd_rate);
+        if lag > 0 {
+            converted_chain.push(format!("atrim=start_sample={lag},asetpts=N/SR/TB"));
+        } else if lag < 0 {
+            original_chain.push(format!("atrim=start_sample={},asetpts=N/SR/TB", -lag));
+        }
+        converted_chain.push(format!("volume={gain:.6}"));
+        trim = Some(original_chain.join(","));
+        converted_filters = Some(converted_chain.join(","));
     }
     let mut a = spawn_f32_decoder(original, remix, resample, trim)?;
-    let mut b = match spawn_f32_decoder(converted, None, converted_resample, converted_filters) {
+    let mut b = match spawn_f32_decoder(converted, None, None, converted_filters) {
         Ok(b) => b,
         Err(e) => {
             let _ = a.kill();
@@ -597,11 +612,17 @@ pub fn verify_quality_part(
     }
 
     // 1. Bit-exact SHA-256 Fingerprint check
-    let orig_hash = compute_pcm_fingerprint_part(&original_path, range, channel, cancelled);
+    // DSD made from PCM can never be bit-exact: skip hashing (it would decode the whole
+    // DSD stream at 352.8 kHz or more for nothing).
+    let probe = |p: &str| crate::audio::convert::probe_source(&get_ffmpeg_executable(), Path::new(p)).ok().and_then(|i| i.codec);
+    let is_dsd = |c: Option<String>| crate::audio::convert::dsd::is_dsd_codec(c.as_deref());
+    let skip_hash = is_dsd(probe(&converted_path)) && !is_dsd(probe(&original_path));
+    let not_comparable = || -> Result<(String, usize), Box<dyn std::error::Error + Send + Sync>> { Err("not comparable".into()) };
+    let orig_hash = if skip_hash { not_comparable() } else { compute_pcm_fingerprint_part(&original_path, range, channel, cancelled) };
     if cancelled() {
         return failure(CANCELLED.into());
     }
-    let conv_hash = compute_pcm_fingerprint_cancellable(&converted_path, cancelled);
+    let conv_hash = if skip_hash { not_comparable() } else { compute_pcm_fingerprint_cancellable(&converted_path, cancelled) };
     if cancelled() {
         return failure(CANCELLED.into());
     }

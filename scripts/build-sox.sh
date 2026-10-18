@@ -95,6 +95,8 @@ make -j"$JOBS" >make.log 2>&1 || { tail -n 60 make.log >&2; exit 1; }
 
 mkdir -p "$WORK/out/bin"
 cp "src/sox$EXE" "$BIN"
+# The exact source, attached to each release next to the app (GPL source offer).
+cp "$SRC/$NAME" "$WORK/out/$NAME"
 strip "$BIN" 2>/dev/null || true
 
 {
@@ -103,13 +105,16 @@ strip "$BIN" 2>/dev/null || true
   echo "It runs as a separate program."
   echo
   echo "Source: https://github.com/mansr/sox (commit $COMMIT)"
-  echo "Archive: $URL"
+  echo "Archive: $URL (SHA-256 $SHA)"
+  echo "The same archive ($NAME) and the build script (scripts/build-sox.sh) are attached"
+  echo "to every release of this application on GitHub, next to the installers."
   echo
   echo "Modification: in src/formats.c, the pipe-rewind hack is also disabled for the"
   echo "Windows UCRT C runtime (one preprocessor condition, see scripts/build-sox.sh)."
   echo
-  echo "Built without any optional libraries, with:"
-  echo "  ./configure ${FLAGS[*]}"
+  echo "Built without any optional libraries: autoreconf -i, then"
+  echo "  CFLAGS=\"$CFLAGS\" ./configure ${FLAGS[*]} ${LDFLAGS_EXTRA[*]:-}"
+  echo "and make; the sox program is src/sox$EXE."
   echo
   echo "The sox program (src/sox.c) is licensed under the GNU General Public License"
   echo "version 2 or later; the library files, including the DSD support (src/sdm.c,"

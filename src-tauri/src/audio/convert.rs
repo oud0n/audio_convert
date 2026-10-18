@@ -2143,13 +2143,9 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
         }
         None
     } else if pcm_to_dsd {
-        let modulated = work.0.join("sox.dsf");
-        dsd::pcm_to_dsf(ctx, &ffmpeg, &input, settings, &source, gain_db, &modulated)?;
+        dsd::pcm_to_dsf(ctx, &ffmpeg, &input, settings, &source, gain_db, &temp_output)?;
         ctx.check()?;
-        // The same bits again, with the tags.
-        let mut reader = dsd::DsdReader::open(&modulated)?;
-        let cancelled = || ctx.cancelled();
-        dsd::write_dsf(&mut reader, &temp_output, &tags_for_output(&tags, false), &cancelled)?;
+        dsd::set_dsf_tags(&temp_output, &tags_for_output(&tags, false))?;
         None
     } else if dsd_copy {
         ctx.emit("converting", 0.0);
