@@ -17,6 +17,9 @@ import { t } from '../utils/i18n';
 import { AppBridge, isTauri, pathOnlyFile } from '../services/bridge';
 import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES, CHANNEL_KEYS, outputSampleRate } from '../utils/fileNamePattern';
 
+/** Height of a queue row in px (fixed, so the windowed list can place rows exactly). */
+const QUEUE_ROW_HEIGHT = 48;
+
 export default function HomeDashboardPage() {
   const {
     // Basic States
@@ -57,17 +60,6 @@ export default function HomeDashboardPage() {
   // The queue table draws only the rows in view (plus a margin) when it is long.
   const listRef = useRef<HTMLDivElement | null>(null);
   const [listView, setListView] = useState({ top: 0, height: 800 });
-  // Average height of the drawn rows (rows with a verification badge are taller).
-  const tbodyRef = useRef<HTMLTableSectionElement | null>(null);
-  const [rowHeight, setRowHeight] = useState(46);
-  useEffect(() => {
-    const rows = tbodyRef.current?.querySelectorAll<HTMLTableRowElement>('tr[data-row]');
-    if (!rows || rows.length === 0) return;
-    let total = 0;
-    rows.forEach(r => { total += r.getBoundingClientRect().height; });
-    const avg = total / rows.length;
-    if (avg > 0 && Math.abs(avg - rowHeight) > 0.5) setRowHeight(avg);
-  });
   const updateListView = () => {
     const el = listRef.current;
     if (el) setListView({ top: el.scrollTop, height: el.clientHeight });
@@ -878,6 +870,9 @@ export default function HomeDashboardPage() {
         <div 
           ref={listRef}
           onScroll={updateListView}
+          // The spacer rows change size while scrolling; the browser must not move the
+          // scroll position to compensate.
+          style={{ overflowAnchor: 'none' }}
           onDragEnter={handleDrag}
           onDragOver={handleDrag}
           onDragLeave={handleDrag}
@@ -902,15 +897,16 @@ export default function HomeDashboardPage() {
                     <th className="py-2.5 px-3 w-18">{lang === 'ja' ? 'ビットレート' : 'Bitrate'}</th>
                     <th className="py-2.5 px-3 w-18">{lang === 'ja' ? 'ピーク値' : 'Peak'}</th>
                     <th className="py-2.5 px-3 w-20">{lang === 'ja' ? '音量調整' : 'Gain'}</th>
-                    <th className="py-2.5 px-3 w-32">{lang === 'ja' ? 'ステータス' : 'Status'}</th>
+                    <th className="py-2.5 px-3 w-44">{lang === 'ja' ? 'ステータス' : 'Status'}</th>
                     <th className="py-2.5 px-3 w-16 text-center">{t(lang, 'colActions')}</th>
                   </tr>
                 </thead>
-                <tbody ref={tbodyRef} className="divide-y divide-zinc-800/30 text-[11px] font-mono">
+                <tbody className="divide-y divide-zinc-800/30 text-[11px] font-mono">
                   {(() => {
-                    // Spacer rows stand in for the rows out of view, at the measured average
-                    // row height. Short lists are drawn whole.
-                    const ROW = rowHeight;
+                    // Spacer rows stand in for the rows out of view. Every row is exactly
+                    // ROW px high (the status cell does not wrap), so the spacers match.
+                    // Short lists are drawn whole.
+                    const ROW = QUEUE_ROW_HEIGHT;
                     const windowed = files.length > 200;
                     const first = windowed ? Math.max(0, Math.floor((listView.top - 60) / ROW) - 20) : 0;
                     const last = windowed ? Math.min(files.length, Math.ceil((listView.top + listView.height) / ROW) + 20) : files.length;
@@ -927,7 +923,7 @@ export default function HomeDashboardPage() {
                     return (
                       <tr
                         key={file.id}
-                        data-row
+                        style={{ height: QUEUE_ROW_HEIGHT }}
                         onClick={() => setSelectedFileId(file.id)}
                         className={`hover:bg-zinc-800/40 cursor-pointer transition-colors duration-100 ${
                           isSelected ? 'bg-emerald-500/5 hover:bg-emerald-500/10' : ''
@@ -1008,7 +1004,7 @@ export default function HomeDashboardPage() {
                               </div>
                             </div>
                           ) : file.status === 'completed' ? (
-                            <div className="flex items-center gap-1.5 flex-wrap">
+                            <div className="flex items-center gap-1.5 flex-nowrap whitespace-nowrap overflow-hidden">
                               <span className="px-1.5 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-md text-[9px] font-bold">
                                 FINISHED
                               </span>
