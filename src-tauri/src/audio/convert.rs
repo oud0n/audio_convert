@@ -2014,6 +2014,7 @@ pub async fn move_output_into_place(from: String, to: String) -> ConvertResponse
 }
 
 mod flac_verbatim;
+pub mod loudness;
 pub mod merge;
 
 #[cfg(test)]

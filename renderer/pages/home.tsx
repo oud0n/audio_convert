@@ -1184,6 +1184,18 @@ export default function HomeDashboardPage() {
                         <span>{t(lang, 'mergeCreateCue')}</span>
                       </label>
                     </div>
+                    <div className="flex items-center gap-1.5 text-zinc-400" title={t(lang, 'replayGainHelp')}>
+                      <span>ReplayGain:</span>
+                      <select
+                        value={settings.replayGain ?? 'off'}
+                        onChange={(e) => updateSetting('replayGain', e.target.value as any)}
+                        className="bg-zinc-900 border border-zinc-800 rounded px-1 py-0.5 text-[11px] text-zinc-300"
+                      >
+                        <option value="off">{t(lang, 'replayGainOff')}</option>
+                        <option value="track">{t(lang, 'replayGainTrack')}</option>
+                        <option value="album">{t(lang, 'replayGainAlbum')}</option>
+                      </select>
+                    </div>
                     <div className={`flex items-center gap-1.5 text-zinc-400 ${settings.saveInSourceFolder ? 'opacity-40' : ''}`}>
                       <span>{t(lang, 'keepFolders')}</span>
                       <select

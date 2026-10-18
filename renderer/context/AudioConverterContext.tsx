@@ -184,6 +184,7 @@ const defaultSettings: ConverterSettings = {
   flacUncompressed: false,
   onExisting: 'rename',
   splitImages: true,
+  replayGain: 'off',
   mergeOutput: false,
   mergeCreateCue: true,
   keepFolderLevels: 0,
@@ -230,6 +231,10 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
   const batchRef = useRef({ success: 0, failed: 0, warnings: 0 });
   /** Rows being merged into one output (they share the progress). */
   const mergeIdsRef = useRef<Set<string>>(new Set());
+  /** Outputs this batch wrote (not kept existing files), for the ReplayGain step. */
+  const batchOutputsRef = useRef<Array<{ path: string; albumKey: string }>>([]);
+  /** The user stopped the running batch. */
+  const jobCancelledRef = useRef(false);
   /** Files of the running batch (files added while it runs are not part of it). */
   const batchFileIdsRef = useRef<Set<string>>(new Set());
   /** Album images in the running batch: their tracks, and those ready for the trash. */
@@ -983,6 +988,8 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     activeConversionTabIdRef.current = targetTabId;
     conversionQueueRef.current = queued.map((f) => f.id);
     batchFileIdsRef.current = new Set(queued.map((f) => f.id));
+    batchOutputsRef.current = [];
+    jobCancelledRef.current = false;
     const groups = new Map<string, { path: string; cuePath?: string; ids: Set<string>; ready: Set<string> }>();
     for (const f of currentTab.files) {
       if (!f.imageGroup || !f.path) continue;
@@ -1067,6 +1074,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         if (originalDeleted) addLogToTab(tabId, lang === 'ja' ? '元ファイルをゴミ箱に移動しました。' : 'Moved the originals to the trash.', 'success');
       }
       batchRef.current.success += files.length;
+      batchOutputsRef.current.push({ path: res.path, albumKey: '' });
       setRows(() => ({ status: 'completed', progress: 100, outputPath: res.path!, outputFileName: res.fileName || undefined, originalDeleted }));
     } catch (err: any) {
       if (!job.cancelled) batchRef.current.failed += files.length;
@@ -1124,7 +1132,39 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     }
   };
 
+  /** ReplayGain / R128 tags for this batch's outputs (album gain per album tag). */
+  const writeReplayGain = async (tabId: string) => {
+    const tabSettings = tabsRef.current.find(t => t.id === tabId)?.settings || defaultSettings;
+    const mode = tabSettings.replayGain ?? 'off';
+    const outputs = batchOutputsRef.current;
+    batchOutputsRef.current = [];
+    if (mode === 'off' || outputs.length === 0 || !AppBridge.isAvailable()) return;
+    const groups = new Map<string, string[]>();
+    outputs.forEach((o, i) => {
+      const key = mode === 'album' && o.albumKey ? o.albumKey : `\u0001${i}`;
+      groups.set(key, [...(groups.get(key) ?? []), o.path]);
+    });
+    addLogToTab(tabId, lang === 'ja' ? 'ReplayGain を測定してタグに書き込んでいます...' : 'Measuring loudness and writing ReplayGain tags...', 'info');
+    for (const paths of Array.from(groups.values())) {
+      const res = await AppBridge.writeLoudnessTags(paths, mode === 'album' && paths.length > 1)
+        .catch((e: any) => ({ success: false, results: [] as Array<{ path: string; error?: string | null }>, albumGainDb: null, error: String(e?.message || e) }));
+      for (const r of res.results) {
+        if (r.error) addLogToTab(tabId, `ReplayGain: "${r.path}": ${r.error}`, 'error');
+      }
+      if (!res.success) {
+        batchRef.current.warnings++;
+        if (res.error) addLogToTab(tabId, `ReplayGain: ${res.error}`, 'error');
+      } else {
+        const album = typeof res.albumGainDb === 'number' ? ` (album ${res.albumGainDb >= 0 ? '+' : ''}${res.albumGainDb.toFixed(2)} dB)` : '';
+        addLogToTab(tabId, lang === 'ja' ? `ReplayGain を書き込みました: ${paths.length} ファイル${album}` : `Wrote ReplayGain tags: ${paths.length} files${album}`, 'success');
+      }
+    }
+  };
+
   const finishBatch = async (targetTabId: string) => {
+    // Not after a cancel: the user stopped the batch.
+    if (batchRef.current.success && !jobCancelledRef.current) await writeReplayGain(targetTabId);
+    else batchOutputsRef.current = [];
     await trashFinishedImages(targetTabId);
     setIsConverting(false);
     activeConversionIdRef.current = null;
@@ -1353,6 +1393,11 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
       }));
 
       if (fileRecord.imageGroup && checksPassed) imageGroupsRef.current.get(fileRecord.imageGroup)?.ready.add(id);
+      const albumName = (fileRecord.tags.album || '').trim();
+      batchOutputsRef.current.push({
+        path: savedOutputPath,
+        albumKey: albumName ? `${(fileRecord.tags.albumArtist || fileRecord.tags.artist || '').trim()}\u0000${albumName}` : '',
+      });
       addLogToTab(tabId, lang === 'ja' ? `[${fileRecord.name}] 変換に成功しました。` : `[${fileRecord.name}] Conversion finished successfully.`, 'success');
 
     } catch (err: any) {
@@ -1471,6 +1516,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
     if (!targetTabId) return;
 
     conversionQueueRef.current = [];
+    jobCancelledRef.current = true;
     const job = jobRef.current;
     if (!job || job.cancelled) return;
     job.cancelled = true;

@@ -214,6 +214,17 @@ export class AppBridge {
     throw new Error('No desktop runtime detected');
   }
 
+  /** Measures outputs (EBU R128) and writes ReplayGain tags; `album` treats them as one album. */
+  static async writeLoudnessTags(paths: string[], album: boolean, jobId?: string): Promise<{
+    success: boolean; results: Array<{ path: string; gainDb?: number | null; error?: string | null }>; albumGainDb?: number | null; error?: string | null;
+  }> {
+    if (isTauri()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      return await invoke('write_loudness_tags', { request: { paths, album, jobId } });
+    }
+    return { success: false, results: [], error: 'Needs the desktop app' };
+  }
+
   /** Joins several sources (track ranges allowed) into one output, with a CUE sheet. */
   static async mergeAudio(request: any): Promise<MergeResult> {
     if (isTauri()) {

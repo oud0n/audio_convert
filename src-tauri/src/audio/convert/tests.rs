@@ -599,6 +599,48 @@ fn merge_joins_sources_and_writes_a_cue_sheet() {
 }
 
 #[test]
+fn ebur128_summary_is_parsed() {
+    let log = "[Parsed_ebur128_0 @ 0x1] Summary:\n\n  Integrated loudness:\n    I:         -20.5 LUFS\n    Threshold: -30.6 LUFS\n\n  Sample peak:\n    Peak:       -6.0 dBFS\n";
+    let l = loudness::parse_ebur128_summary(log).unwrap();
+    assert_eq!(l.integrated, -20.5);
+    assert!((l.peak - 0.501187).abs() < 1e-5);
+    let tags = loudness::loudness_tags(OutFormat::Flac, l, Some(loudness::Loudness { integrated: -19.0, peak: 0.9 }));
+    assert_eq!(tags[0], ("REPLAYGAIN_TRACK_GAIN".to_string(), "+2.50 dB".to_string()));
+    assert_eq!(tags[2], ("REPLAYGAIN_ALBUM_GAIN".to_string(), "+1.00 dB".to_string()));
+    assert_eq!(loudness::loudness_tags(OutFormat::Opus, l, None), [("R128_TRACK_GAIN".to_string(), "-640".to_string())]);
+}
+
+#[test]
+fn replaygain_tags_are_written_without_touching_the_audio() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let d = temp_dir();
+    let src = make_source(&d.0);
+    let ff = get_ffmpeg_executable();
+    let mut paths = Vec::new();
+    for format in ["FLAC", "ALAC", "M4A", "MP3", "OGG", "OPUS", "WAV", "AIFF", "WAVPACK"] {
+        let (path, _) = convert_blocking(&ctx(), &request(&src, &d.0.join("out"), format, format)).unwrap_or_else(|e| panic!("{format}: {e}"));
+        paths.push(path);
+    }
+    let before: Vec<_> = paths.iter().map(|p| compute_pcm_fingerprint(p.to_str().unwrap()).unwrap()).collect();
+    let req = loudness::LoudnessRequest { paths: paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(), album: true, job_id: None };
+    let res = loudness::write_loudness_blocking(&ctx(), &req);
+    assert!(res.success, "{:?}", res.results.iter().filter(|r| r.error.is_some()).collect::<Vec<_>>());
+    assert!(res.album_gain_db.is_some());
+    for (p, h) in paths.iter().zip(&before) {
+        assert_eq!(&compute_pcm_fingerprint(p.to_str().unwrap()).unwrap(), h, "{}: audio unchanged", p.display());
+        let tags = read_source_tags(&ff, p).unwrap();
+        let key = if p.extension().unwrap() == "opus" { "r128_album_gain" } else { "replaygain_album_gain" };
+        assert!(tags.iter().any(|(k, _)| k == key), "{}: {tags:?}", p.display());
+        assert!(tags.iter().any(|(k, v)| k == "title" && v == "Source"), "{}: other tags kept", p.display());
+        // Still this session's output of `src`: another source must not overwrite it.
+        assert!(written_from_other_source(p, &d.0.join("cover.png"), None), "{}", p.display());
+    }
+    assert!(probe_source(&ff, &paths[0]).unwrap().has_art(), "FLAC keeps its cover");
+}
+
+#[test]
 fn hi_res_source_to_mp3_and_opus_succeeds() {
     if !ffmpeg_available() {
         return;
