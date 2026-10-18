@@ -65,7 +65,7 @@ export const DonateModal: React.FC<DonateModalProps> = ({ isOpen, onClose, lang 
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
+            className="p-1.5 rounded-lg text-zinc-400 hover:text-fg hover:bg-zinc-800 transition-colors cursor-pointer"
             aria-label={ja ? '閉じる' : 'Close'}
           >
             <X className="h-[18px] w-[18px]" />
@@ -82,13 +82,13 @@ export const DonateModal: React.FC<DonateModalProps> = ({ isOpen, onClose, lang 
             <p className="text-xs text-zinc-300 leading-relaxed">
               {ja ? (
                 <>
-                  <strong className="text-white">Audio Convert（audio_convert）</strong>
+                  <strong className="text-fg">Audio Convert（audio_convert）</strong>
                   は、個人が休日や夜間に開発している、無料でソースコードを公開しているソフトウェアです。
                   xrecode 互換の変換、ロスレスのビット一致検証、CUE 分割や DSD 対応などの継続開発をサポートしていただけると大変励みになります☕🎧
                 </>
               ) : (
                 <>
-                  <strong className="text-white">Audio Convert (audio_convert)</strong>
+                  <strong className="text-fg">Audio Convert (audio_convert)</strong>
                   {' '}is free, source-available software developed in my spare time.
                   Your support keeps xrecode-compatible conversion, bit-exact lossless checks, CUE splitting and DSD support moving forward ☕🎧
                 </>
@@ -152,7 +152,7 @@ export const DonateModal: React.FC<DonateModalProps> = ({ isOpen, onClose, lang 
                 <Smartphone className="h-[13px] w-[13px] text-amber-400" />
                 <span>{ja ? 'スマホから支援' : 'From your phone'}</span>
               </div>
-              <div className="p-2.5 bg-white rounded-xl shadow-lg border border-zinc-300 flex items-center justify-center">
+              <div className="p-2.5 bg-[#ffffff] rounded-xl shadow-lg border border-zinc-300 flex items-center justify-center">
                 <QRCodeSVG value={BUY_ME_A_COFFEE_URL} size={128} bgColor="#ffffff" fgColor="#000000" level="M" includeMargin={false} />
               </div>
               <p className="text-[10px] text-zinc-400 mt-2.5 leading-tight">

@@ -9,8 +9,9 @@ import { useAudioConverter, outputTags } from '../context/AudioConverterContext'
 import { 
   FileAudio, Upload, Trash2, Sliders, Volume2, 
   Plus, X, Save, Settings, Info, RefreshCw, AlertCircle,
-  ShieldCheck, Coffee
+  ShieldCheck, Coffee, Sun, Moon, Monitor
 } from '../components/Icons';
+import { setThemeSetting, useThemeSetting, useResolvedTheme, canvasColors, type ThemeSetting } from '../utils/theme';
 import { DonateModal } from '../components/DonateModal';
 import { estimateOutputSize } from '../utils/audioEncoder';
 import { MetadataTags, getFormatExtension, VBR_FORMATS } from '../types';
@@ -87,6 +88,8 @@ export default function HomeDashboardPage() {
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [showPatternHelpModal, setShowPatternHelpModal] = useState(false);
   const [showDonateModal, setShowDonateModal] = useState(false);
+  const themeSetting = useThemeSetting();
+  const resolvedTheme = useResolvedTheme();
   // The app menu's "Support the developer" item opens the same dialog.
   useEffect(() => {
     if (!AppBridge.isAvailable()) return;
@@ -154,15 +157,16 @@ export default function HomeDashboardPage() {
   // Waveform Renderer Effect
   useEffect(() => {
     if (bottomTab !== 'metadata') return;
+    const colors = canvasColors();
     if (!canvasRef.current || !selectedFile || !selectedFile.originalAudioBuffer) {
       if (canvasRef.current) {
         const ctx = canvasRef.current.getContext('2d');
         if (ctx) {
           ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-          ctx.fillStyle = '#09090b';
+          ctx.fillStyle = colors.bg;
           ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
           ctx.font = '11px "JetBrains Mono", monospace';
-          ctx.fillStyle = '#4b5563';
+          ctx.fillStyle = colors.text;
           ctx.textAlign = 'center';
           ctx.fillText(!selectedFile ? 'SELECT A FILE TO DRAW WAVEFORM' : selectedFile.previewError ? 'WAVEFORM UNAVAILABLE (FILE CANNOT BE READ)' : 'LOADING WAVEFORM...', canvasRef.current.width / 2, canvasRef.current.height / 2);
         }
@@ -179,11 +183,11 @@ export default function HomeDashboardPage() {
     const width = canvas.width;
     const height = canvas.height;
 
-    ctx.fillStyle = '#09090b';
+    ctx.fillStyle = colors.bg;
     ctx.fillRect(0, 0, width, height);
 
     // Draw grid
-    ctx.strokeStyle = '#1f2937';
+    ctx.strokeStyle = colors.grid;
     ctx.lineWidth = 1;
     const gridCols = 10;
     for (let i = 1; i < gridCols; i++) {
@@ -203,7 +207,7 @@ export default function HomeDashboardPage() {
     }
 
     // Center axis
-    ctx.strokeStyle = '#374151';
+    ctx.strokeStyle = colors.axis;
     ctx.beginPath();
     ctx.moveTo(0, height / 2);
     ctx.lineTo(width, height / 2);
@@ -229,9 +233,9 @@ export default function HomeDashboardPage() {
 
       const progressRatio = i / width;
       if (progressRatio <= playbackProgress) {
-        ctx.strokeStyle = '#10b981'; // emerald-500
+        ctx.strokeStyle = colors.played;
       } else {
-        ctx.strokeStyle = '#4b5563'; // grey-600
+        ctx.strokeStyle = colors.wave;
       }
 
       ctx.lineWidth = 1.5;
@@ -251,28 +255,28 @@ export default function HomeDashboardPage() {
       const mins = Math.floor(buffer.duration / 60);
       const secs = Math.floor(buffer.duration % 60).toString().padStart(2, '0');
       ctx.font = '10px "JetBrains Mono", monospace';
-      ctx.fillStyle = '#f59e0b';
+      ctx.fillStyle = colors.note;
       ctx.textAlign = 'right';
       ctx.fillText(lang === 'ja' ? `プレビューは先頭 ${mins}:${secs} のみ` : `PREVIEW: FIRST ${mins}:${secs} ONLY`, width - 8, 14);
     }
 
     // Playhead
     const cursorX = playbackProgress * width;
-    ctx.strokeStyle = '#f43f5e'; // rose-500
+    ctx.strokeStyle = colors.playhead;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(cursorX, 0);
     ctx.lineTo(cursorX, height);
     ctx.stroke();
 
-    ctx.fillStyle = '#f43f5e';
+    ctx.fillStyle = colors.playhead;
     ctx.beginPath();
     ctx.moveTo(cursorX - 5, 0);
     ctx.lineTo(cursorX + 5, 0);
     ctx.lineTo(cursorX, 8);
     ctx.fill();
 
-  }, [selectedFile, playbackProgress, bottomTab]);
+  }, [selectedFile, playbackProgress, bottomTab, resolvedTheme]);
 
   // Audio Playback Implementation
   const startPlayback = () => {
@@ -675,7 +679,7 @@ export default function HomeDashboardPage() {
                   onDoubleClick={() => startEditingTab(tab.id, tab.name)}
                   className={`flex items-center gap-2 h-9 px-3 text-xs border-t-2 rounded-t-md cursor-pointer transition-all duration-150 ${
                     isActive 
-                      ? 'bg-zinc-950 text-white border-t-emerald-500 font-bold border-x border-zinc-800' 
+                      ? 'bg-zinc-950 text-fg border-t-emerald-500 font-bold border-x border-zinc-800' 
                       : 'bg-zinc-900/60 hover:bg-zinc-800/40 text-zinc-400 border-t-transparent border-x border-transparent'
                   }`}
                 >
@@ -686,7 +690,7 @@ export default function HomeDashboardPage() {
                       onChange={(e) => setEditingTabName(e.target.value)}
                       onBlur={() => finishEditingTab(tab.id)}
                       onKeyDown={(e) => handleTabNameKeyDown(e, tab.id)}
-                      className="bg-zinc-900 border border-zinc-700 text-white px-1 py-0.5 rounded text-[11px] focus:outline-none focus:border-emerald-500 w-24"
+                      className="bg-zinc-900 border border-zinc-700 text-fg px-1 py-0.5 rounded text-[11px] focus:outline-none focus:border-emerald-500 w-24"
                       autoFocus
                     />
                   ) : (
@@ -736,6 +740,27 @@ export default function HomeDashboardPage() {
               </button>
             </div>
             
+            <div className="flex items-center bg-zinc-900 p-0.5 rounded border border-zinc-800" role="radiogroup" aria-label={lang === 'ja' ? 'テーマ' : 'Theme'}>
+              {([
+                { value: 'light', Icon: Sun, label: lang === 'ja' ? 'ライトモード' : 'Light mode' },
+                { value: 'dark', Icon: Moon, label: lang === 'ja' ? 'ダークモード' : 'Dark mode' },
+                { value: 'system', Icon: Monitor, label: lang === 'ja' ? 'システムに合わせる' : 'Match system' },
+              ] as { value: ThemeSetting; Icon: typeof Sun; label: string }[]).map(({ value, Icon, label }) => (
+                <button
+                  key={value}
+                  onClick={() => setThemeSetting(value)}
+                  role="radio"
+                  aria-checked={themeSetting === value}
+                  title={label}
+                  className={`p-1 rounded transition-colors cursor-pointer ${
+                    themeSetting === value ? 'bg-zinc-700 text-fg' : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  <Icon className="h-3 w-3" />
+                </button>
+              ))}
+            </div>
+
             <button
               onClick={() => setShowDonateModal(true)}
               className="flex items-center gap-1.5 px-2 py-0.5 rounded border border-amber-400/30 bg-amber-400/10 text-amber-300 hover:bg-amber-400/20 text-[10px] font-semibold transition-colors cursor-pointer"
@@ -745,7 +770,7 @@ export default function HomeDashboardPage() {
               <span>{lang === 'ja' ? '支援' : 'Support'}</span>
             </button>
 
-            <div className="flex items-center gap-2 font-sans font-bold text-white">
+            <div className="flex items-center gap-2 font-sans font-bold text-fg">
               <Volume2 className="h-4 w-4 text-emerald-400 shrink-0" />
               <span>Audio Convert</span>
             </div>
@@ -823,7 +848,7 @@ export default function HomeDashboardPage() {
               <button 
                 onClick={playPrevTrack} 
                 disabled={files.length === 0}
-                className="p-1 hover:bg-zinc-800 hover:text-white rounded disabled:opacity-20 text-zinc-400 cursor-pointer"
+                className="p-1 hover:bg-zinc-800 hover:text-fg rounded disabled:opacity-20 text-zinc-400 cursor-pointer"
               >
                 <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
               </button>
@@ -831,7 +856,7 @@ export default function HomeDashboardPage() {
               <button
                 onClick={togglePlayback}
                 disabled={!selectedFile}
-                className="p-1 hover:bg-zinc-800 hover:text-white rounded disabled:opacity-20 text-zinc-400 cursor-pointer"
+                className="p-1 hover:bg-zinc-800 hover:text-fg rounded disabled:opacity-20 text-zinc-400 cursor-pointer"
               >
                 {isPlaying ? (
                   <svg className="h-3.5 w-3.5 fill-current" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
@@ -843,7 +868,7 @@ export default function HomeDashboardPage() {
               <button 
                 onClick={stopPlayback} 
                 disabled={!selectedFile}
-                className="p-1 hover:bg-zinc-800 hover:text-white rounded disabled:opacity-20 text-zinc-400 cursor-pointer"
+                className="p-1 hover:bg-zinc-800 hover:text-fg rounded disabled:opacity-20 text-zinc-400 cursor-pointer"
               >
                 <svg className="h-3.5 w-3.5 fill-current" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>
               </button>
@@ -851,7 +876,7 @@ export default function HomeDashboardPage() {
               <button 
                 onClick={playNextTrack} 
                 disabled={files.length === 0}
-                className="p-1 hover:bg-zinc-800 hover:text-white rounded disabled:opacity-20 text-zinc-400 cursor-pointer"
+                className="p-1 hover:bg-zinc-800 hover:text-fg rounded disabled:opacity-20 text-zinc-400 cursor-pointer"
               >
                 <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
               </button>
@@ -1118,7 +1143,7 @@ export default function HomeDashboardPage() {
                 <FileAudio className="h-6 w-6 animate-pulse" />
               </div>
               <div>
-                <h3 className="text-sm font-semibold text-white">
+                <h3 className="text-sm font-semibold text-fg">
                   {lang === 'ja' ? '変換キューは空です' : 'Conversion Queue is Empty'}
                 </h3>
                 <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">
@@ -1150,7 +1175,7 @@ export default function HomeDashboardPage() {
                   onClick={() => setBottomTab(tab)}
                   className={`h-full px-4 text-xs font-semibold border-b-2 transition-all cursor-pointer relative ${
                     isActive 
-                      ? 'border-emerald-500 text-white font-bold bg-zinc-950/40' 
+                      ? 'border-emerald-500 text-fg font-bold bg-zinc-950/40' 
                       : 'border-transparent text-zinc-400 hover:text-zinc-200'
                   }`}
                 >
@@ -1908,7 +1933,7 @@ export default function HomeDashboardPage() {
                 <div className="flex items-center justify-between border-b border-zinc-900 pb-2 shrink-0">
                   <div className="flex items-center gap-2">
                     <ShieldCheck className="h-4 w-4 text-emerald-400" />
-                    <span className="font-bold text-white text-xs">{t(lang, 'qualityTitle')}</span>
+                    <span className="font-bold text-fg text-xs">{t(lang, 'qualityTitle')}</span>
                   </div>
                   {selectedFile && (
                     <button
@@ -1963,7 +1988,7 @@ export default function HomeDashboardPage() {
                         </span>
                       </div>
 
-                      <div className="text-white text-xs font-semibold">
+                      <div className="text-fg text-xs font-semibold">
                         {selectedFile.verificationResult.summaryMessage}
                       </div>
 
@@ -2062,7 +2087,7 @@ export default function HomeDashboardPage() {
               <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
                 <div className="flex items-center gap-2">
                   <Sliders className="h-4 w-4 text-emerald-400" />
-                  <span className="font-bold text-white text-sm">
+                  <span className="font-bold text-fg text-sm">
                     {settings.outputFormat} {t(lang, 'encoderDetailSettings')}
                   </span>
                 </div>
@@ -2239,7 +2264,7 @@ export default function HomeDashboardPage() {
               <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
                 <div className="flex items-center gap-2">
                   <Info className="h-4.5 w-4.5 text-emerald-400" />
-                  <span className="font-bold text-white text-sm">
+                  <span className="font-bold text-fg text-sm">
                     {lang === 'ja' ? 'ファイル名パターン ヘルプ & マクロタグ' : 'Filename Pattern Help & Macro Tags'}
                   </span>
                 </div>
@@ -2319,7 +2344,7 @@ export default function HomeDashboardPage() {
               <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
                 <div className="flex items-center gap-2 text-rose-450">
                   <AlertCircle className="h-4.5 w-4.5 shrink-0 text-rose-500" />
-                  <span className="font-bold text-white text-sm">
+                  <span className="font-bold text-fg text-sm">
                     {lang === 'ja' ? '一部のファイルの読み込みがスキップされました' : 'Some files were skipped'}
                   </span>
                 </div>
