@@ -210,7 +210,7 @@ fn write_frame(info: &StreamInfo, number: u64, samples: &[i32], n: usize) -> Vec
 /// interleaved, as FFmpeg decodes the same file). The new file is written once, next to
 /// `flac`: the header first with a placeholder STREAMINFO, then the frames, then the
 /// STREAMINFO is patched in place, so the disk holds only the old and the new file.
-pub fn rewrite_verbatim_from(flac: &Path, pcm: impl Read) -> Result<(), String> {
+pub fn rewrite_verbatim_from(flac: &Path, pcm: impl Read, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
     let (blocks, _) = read_blocks(&mut BufReader::new(File::open(flac).map_err(|e| e.to_string())?))?;
     let stream = blocks.first().filter(|b| b.kind == 0).ok_or("FLAC has no STREAMINFO")?;
     let info = parse_stream_info(&stream.data)?;
@@ -245,6 +245,10 @@ pub fn rewrite_verbatim_from(flac: &Path, pcm: impl Read) -> Result<(), String> 
         let mut raw = vec![0u8; BLOCK * ch * 4];
         let mut first_block = None;
         loop {
+            // Returning drops the pipe, so FFmpeg stops as well.
+            if cancelled() {
+                return Err("Conversion cancelled".into());
+            }
             let got = read_full(&mut reader, &mut raw).map_err(|e| e.to_string())?;
             let n = got / (4 * ch);
             if n == 0 {

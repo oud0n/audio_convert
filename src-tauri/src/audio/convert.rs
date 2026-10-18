@@ -2192,15 +2192,30 @@ fn convert_core(ctx: &JobCtx, request: &ConvertRequest, folder_source: Option<&P
             .args(["-map", "0:a:0", "-c:a", "pcm_s32le", "-f", "s32le", "-"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to start FFmpeg: {e}"))?;
         let pcm = child.stdout.take().ok_or("Failed to read FFmpeg's output")?;
-        let rewritten = flac_verbatim::rewrite_verbatim_from(&temp_output, pcm);
+        // Drained on its own thread so FFmpeg never blocks on it; the end is kept for errors.
+        let stderr = child.stderr.take();
+        let err_tail = std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut e) = stderr {
+                let _ = e.read_to_string(&mut text);
+            }
+            text.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" / ")
+        });
+        let cancelled = || ctx.cancelled();
+        let rewritten = flac_verbatim::rewrite_verbatim_from(&temp_output, pcm, &cancelled);
+        if rewritten.is_err() {
+            let _ = child.kill();
+        }
         let status = child.wait().map_err(|e| e.to_string())?;
+        let tail = err_tail.join().unwrap_or_default();
+        ctx.check()?;
         rewritten.map_err(|e| format!("Cannot write uncompressed FLAC: {e}"))?;
         if !status.success() {
-            return Err("Cannot write uncompressed FLAC: decoding failed".into());
+            return Err(format!("Cannot write uncompressed FLAC: decoding failed ({tail})"));
         }
         ctx.check()?;
     }

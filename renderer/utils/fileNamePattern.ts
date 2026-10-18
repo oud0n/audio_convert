@@ -326,3 +326,39 @@ export function applyTagRules<T extends PatternTags>(tags: T, text: string, now:
   }
   return out;
 }
+
+const STANDARD_RATES = [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000];
+const LOSSY_RATES: Record<string, number[]> = {
+  MP3: [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000],
+  OPUS: [48000],
+  AC3: [32000, 44100, 48000],
+  WMA: [8000, 11025, 16000, 22050, 32000, 44100, 48000],
+  M4A: [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000],
+  OGG: [8000, 11025, 16000, 22050, 32000, 44100, 48000, 88200, 96000, 192000],
+};
+
+/** Highest allowed rate <= wanted, preferring one that divides it (the converter's rule). */
+function pickFrom(rates: number[], wanted: number): number {
+  if (rates.includes(wanted)) return wanted;
+  const below = rates.filter(r => r <= wanted);
+  const even = below.filter(r => wanted % r === 0);
+  if (even.length) return Math.max(...even);
+  return below.length ? Math.max(...below) : rates[0];
+}
+
+/**
+ * The sample rate a file will be written at, as the converter decides it: the source's
+ * rate ("same as source") or the chosen one, under the rate limit, then a rate the
+ * lossy encoder accepts.
+ */
+export function outputSampleRate(sourceRate: number, s: { sameAsSource?: boolean; sampleRate?: number; maxSampleRate?: number; bitrateMode?: string }, format: string): number {
+  let rate = s.sameAsSource ? sourceRate : (s.sampleRate || sourceRate);
+  const max = s.maxSampleRate || 0;
+  if (max && rate > max) rate = pickFrom([...STANDARD_RATES.filter(r => r <= max), max], rate);
+  const lossy = LOSSY_RATES[(format || '').toUpperCase()];
+  if (lossy) rate = pickFrom(lossy, rate);
+  // VBR AAC uses Apple's encoder on macOS, which stops at 48 kHz.
+  const mac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.userAgent);
+  if (mac && (format || '').toUpperCase() === 'M4A' && s.bitrateMode === 'vbr') rate = pickFrom(LOSSY_RATES.MP3, rate);
+  return rate;
+}

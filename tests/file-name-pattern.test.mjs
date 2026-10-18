@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   renderFileName, normalizePattern, tagsFromMetadata, editedTags, isLosslessSource, DEFAULT_RENAME_PATTERN,
   safeFileName, insertToken,
+  outputSampleRate,
 } from '../renderer/utils/fileNamePattern.ts';
 
 const full = { title: 'Song', artist: 'A', album: 'Al', albumArtist: 'AA', disc: '1', track: '3', year: '1999', genre: '', comment: '' };
@@ -84,4 +85,14 @@ test('separators written in the pattern make subfolders', () => {
   assert.equal(renderFileName(' a / .. / b ', {}, 'f'), 'a/audio/b', 'dot folders are not kept');
   assert.equal(renderFileName('%album%/%title%|%filename%', { title: 'T' }, 'src.flac'), 'src', 'missing tag falls back');
   assert.equal(renderFileName('/', {}, 'src.flac'), 'src');
+});
+
+test('output sample rate follows the converter', () => {
+  const keep = { sameAsSource: true, maxSampleRate: 96000 };
+  assert.equal(outputSampleRate(192000, keep, 'FLAC'), 96000);
+  assert.equal(outputSampleRate(176400, keep, 'FLAC'), 88200);
+  assert.equal(outputSampleRate(44100, keep, 'FLAC'), 44100);
+  assert.equal(outputSampleRate(96000, { sameAsSource: true }, 'OPUS'), 48000);
+  assert.equal(outputSampleRate(88200, { sameAsSource: true }, 'MP3'), 44100);
+  assert.equal(outputSampleRate(96000, { sameAsSource: false, sampleRate: 48000 }, 'WAV'), 48000);
 });

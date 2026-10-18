@@ -15,7 +15,7 @@ import { estimateOutputSize } from '../utils/audioEncoder';
 import { MetadataTags, getFormatExtension, VBR_FORMATS } from '../types';
 import { t } from '../utils/i18n';
 import { AppBridge, isTauri, pathOnlyFile } from '../services/bridge';
-import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES, CHANNEL_KEYS } from '../utils/fileNamePattern';
+import { renderFileName, insertToken, PREVIEW_TAGS, SUPPORTED_INPUT_EXTENSIONS, LOSSLESS_OUTPUT_FORMATS, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES, CHANNEL_KEYS, outputSampleRate } from '../utils/fileNamePattern';
 
 export default function HomeDashboardPage() {
   const {
@@ -57,14 +57,31 @@ export default function HomeDashboardPage() {
   // The queue table draws only the rows in view (plus a margin) when it is long.
   const listRef = useRef<HTMLDivElement | null>(null);
   const [listView, setListView] = useState({ top: 0, height: 800 });
+  // Average height of the drawn rows (rows with a verification badge are taller).
+  const tbodyRef = useRef<HTMLTableSectionElement | null>(null);
+  const [rowHeight, setRowHeight] = useState(46);
+  useEffect(() => {
+    const rows = tbodyRef.current?.querySelectorAll<HTMLTableRowElement>('tr[data-row]');
+    if (!rows || rows.length === 0) return;
+    let total = 0;
+    rows.forEach(r => { total += r.getBoundingClientRect().height; });
+    const avg = total / rows.length;
+    if (avg > 0 && Math.abs(avg - rowHeight) > 0.5) setRowHeight(avg);
+  });
   const updateListView = () => {
     const el = listRef.current;
     if (el) setListView({ top: el.scrollTop, height: el.clientHeight });
   };
   useEffect(() => {
     updateListView();
+    const el = listRef.current;
+    const observer = typeof ResizeObserver !== 'undefined' && el ? new ResizeObserver(updateListView) : null;
+    if (observer && el) observer.observe(el);
     window.addEventListener('resize', updateListView);
-    return () => window.removeEventListener('resize', updateListView);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', updateListView);
+    };
   }, []);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -889,10 +906,11 @@ export default function HomeDashboardPage() {
                     <th className="py-2.5 px-3 w-16 text-center">{t(lang, 'colActions')}</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-800/30 text-[11px] font-mono">
+                <tbody ref={tbodyRef} className="divide-y divide-zinc-800/30 text-[11px] font-mono">
                   {(() => {
-                    // Rows are ~46 px high. Short lists are drawn whole.
-                    const ROW = 46;
+                    // Spacer rows stand in for the rows out of view, at the measured average
+                    // row height. Short lists are drawn whole.
+                    const ROW = rowHeight;
                     const windowed = files.length > 200;
                     const first = windowed ? Math.max(0, Math.floor((listView.top - 60) / ROW) - 20) : 0;
                     const last = windowed ? Math.min(files.length, Math.ceil((listView.top + listView.height) / ROW) + 20) : files.length;
@@ -909,6 +927,7 @@ export default function HomeDashboardPage() {
                     return (
                       <tr
                         key={file.id}
+                        data-row
                         onClick={() => setSelectedFileId(file.id)}
                         className={`hover:bg-zinc-800/40 cursor-pointer transition-colors duration-100 ${
                           isSelected ? 'bg-emerald-500/5 hover:bg-emerald-500/10' : ''
@@ -955,7 +974,7 @@ export default function HomeDashboardPage() {
                         </td>
                         
                         {/* Sample rate */}
-                        <td className="py-2 px-3 text-zinc-400">{(file.sampleRate / 1000).toFixed(1)} kHz</td>
+                        <td className="py-2 px-3 text-zinc-400">{(outputSampleRate(file.sourceSampleRate ?? file.sampleRate, settings, file.outputFormat || settings.outputFormat) / 1000).toFixed(1)} kHz</td>
 
                         {/* Bitrate */}
                         <td className="py-2 px-3 text-zinc-450 text-zinc-500">{settings.bitrate}k</td>
@@ -2111,8 +2130,8 @@ export default function HomeDashboardPage() {
                   />
                   <p>
                     {lang === 'ja' 
-                      ? '※ 変換はアプリに同梱した FFmpeg で、このコンピュータ上で行います。'
-                      : '* Conversion runs on this computer with the FFmpeg bundled in the app.'
+                      ? (AppBridge.isAvailable() ? '※ 変換はアプリに同梱した FFmpeg で、このコンピュータ上で行います。' : '※ ブラウザ版では、ブラウザ内の簡易エンコーダで変換します。')
+                      : (AppBridge.isAvailable() ? '* Conversion runs on this computer with the FFmpeg bundled in the app.' : '* In the browser version, a simple in-browser encoder converts the files.')
                     }
                   </p>
                 </div>

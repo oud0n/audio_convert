@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import { AudioFile, ConverterSettings, MetadataTags, JobTab, LogEntry, getFormatExtension } from '../types';
 import { analyzeAudioBuffer } from '../utils/audioEncoder';
 import { AppBridge, isPathOnlyFile, type PathOnlyFile, type ImageTrack, type MetadataResult } from '../services/bridge';
-import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS, IMAGE_CAPABLE_EXTENSIONS, applyTagRules, renderChannelFileName, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES, TAG_KEYS } from '../utils/fileNamePattern';
+import { DEFAULT_RENAME_PATTERN, renderFileName, emptyTags, tagsFromMetadata, editedTags, isLosslessSource, LOSSLESS_OUTPUT_FORMATS, IMAGE_CAPABLE_EXTENSIONS, applyTagRules, renderChannelFileName, DEFAULT_CHANNEL_PATTERN, DEFAULT_CHANNEL_NAMES, TAG_KEYS, outputSampleRate } from '../utils/fileNamePattern';
 
 interface AudioConverterContextType {
   files: AudioFile[];
@@ -1426,7 +1426,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         : Math.pow(10, tabSettings.volumeBoostDb / 20);
 
       addLogToTab(tabId, tabSettings.sameAsSource
-        ? `[${fileRecord.name}] Step 2: Converting with FFmpeg (same as source: ${fileRecord.sourceSampleRate ?? fileRecord.sampleRate} Hz${tabSettings.maxSampleRate ? `, max ${tabSettings.maxSampleRate} Hz` : ''})...`
+        ? `[${fileRecord.name}] Step 2: Converting with FFmpeg (same as source: ${fileRecord.sourceSampleRate ?? fileRecord.sampleRate} Hz${outputSampleRate(fileRecord.sourceSampleRate ?? fileRecord.sampleRate, tabSettings, fileRecord.outputFormat) !== (fileRecord.sourceSampleRate ?? fileRecord.sampleRate) ? ` -> ${outputSampleRate(fileRecord.sourceSampleRate ?? fileRecord.sampleRate, tabSettings, fileRecord.outputFormat)} Hz` : ''})...`
         : `[${fileRecord.name}] Step 2: Converting with FFmpeg (resampling: ${tabSettings.sampleRate}Hz, bit depth: ${tabSettings.bitDepth}-bit)...`, 'info');
       updateFileStatus(tabId, id, 'converting', 0);
 
