@@ -718,30 +718,6 @@ export default function SettingsPage() {
                 </button>
               </div>
 
-              {/* Tag replacement rules (xrecode tagsreplace.txt format) */}
-              <div className="space-y-1.5 pt-1">
-                <label className="flex items-center gap-2 text-xs text-zinc-300 font-semibold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={settings.tagReplaceEnabled ?? false}
-                    onChange={(e) => updateSetting('tagReplaceEnabled', e.target.checked as any)}
-                    className="rounded border-zinc-800 bg-zinc-900 accent-emerald-500 cursor-pointer"
-                  />
-                  <span>TAG REPLACE RULES (xrecode tagsreplace.txt)</span>
-                </label>
-                <textarea
-                  value={settings.tagReplaceRules ?? ''}
-                  onChange={(e) => updateSetting('tagReplaceRules', e.target.value as any)}
-                  rows={6}
-                  spellCheck={false}
-                  placeholder={'[*]\nFeaturing=Ft.\n[Comments]\n<NULL>=Converted %y%-%m%-%d%\n[Genre]\n%CHANGECASE%=CapitalizEeachWord'}
-                  className={`w-full bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-[11px] text-zinc-300 font-mono focus:border-emerald-500 focus:outline-none ${settings.tagReplaceEnabled ? '' : 'opacity-60'}`}
-                />
-                <span className="text-[10px] text-zinc-500 font-mono leading-tight block">
-                  [*] / [Title] / [Artist] / [Album] / [Album Artist] / [Year] / [Genre] / [Track] / [Disc] / [Comments]; "!" after the name ignores case. from=to, &lt;NULL&gt;, &lt;ANY&gt;, %CHANGECASE%=UpperCase|LowerCase|CapitalizEeachWord, %y% %m% %d%, %track2% %totaltracks2%.
-                </span>
-              </div>
-
               {/* Pattern Input and Preview */}
               <div className="space-y-3 pt-1">
                 <div className="space-y-1">

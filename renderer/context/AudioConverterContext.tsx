@@ -762,6 +762,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                   tags: finalTags,
                   sourceTags: { ...finalTags },
                   sourceLossless,
+                  sourceCodec: metaFormat?.codec ?? undefined,
                 };
                 resolve({ success: true, fileRecord });
               };
@@ -860,6 +861,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
                             tags: metadataTags,
                             sourceTags: { ...metadataTags },
                             sourceLossless: typeof metaResultObj?.format?.lossless === 'boolean' ? metaResultObj.format.lossless : undefined,
+                            sourceCodec: metaResultObj?.format?.codec ?? undefined,
                           };
                           resolve({ success: true, fileRecord });
                         },
@@ -1114,7 +1116,7 @@ export const AudioConverterProvider = ({ children }: { children: React.ReactNode
         if (res.tracks.length < 2) continue;
         const meta: MetadataResult = {
           success: true,
-          format: { duration: f.duration, sampleRate: f.sourceSampleRate ?? f.sampleRate, numberOfChannels: f.sourceChannels ?? f.channels, bitrate: 0, lossless: f.sourceLossless },
+          format: { duration: f.duration, sampleRate: f.sourceSampleRate ?? f.sampleRate, numberOfChannels: f.sourceChannels ?? f.channels, bitrate: 0, lossless: f.sourceLossless, codec: f.sourceCodec },
           tags: { ...f.tags, totalTracks: f.tags.totalTracks ?? '', totalDiscs: f.tags.totalDiscs ?? '' },
         };
         const stem = f.name.replace(/\.[^.]+$/, '');

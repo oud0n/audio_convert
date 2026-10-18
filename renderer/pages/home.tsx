@@ -925,7 +925,8 @@ export default function HomeDashboardPage() {
                         key={file.id}
                         style={{ height: QUEUE_ROW_HEIGHT }}
                         onClick={() => setSelectedFileId(file.id)}
-                        className={`hover:bg-zinc-800/40 cursor-pointer transition-colors duration-100 ${
+                        // One line per cell, so every row is exactly QUEUE_ROW_HEIGHT.
+                        className={`hover:bg-zinc-800/40 cursor-pointer transition-colors duration-100 [&>td]:whitespace-nowrap ${
                           isSelected ? 'bg-emerald-500/5 hover:bg-emerald-500/10' : ''
                         }`}
                       >
@@ -945,7 +946,7 @@ export default function HomeDashboardPage() {
                             }
                             // Extract keeps the stream's codec, Copy the file's own extension.
                             const ext = settings.actionMode === 'copy'
-                              ? (file.originalFormat || getFormatExtension(file.outputFormat || settings.outputFormat))
+                              ? (file.originalFormat || 'bin')
                               : settings.actionMode === 'extract'
                                 ? (file.sourceCodec ? extractExtension(file.sourceCodec) : '?')
                                 : getFormatExtension(file.outputFormat || settings.outputFormat);
@@ -963,7 +964,7 @@ export default function HomeDashboardPage() {
                         
                         {/* Format */}
                         <td className="py-2 px-3 text-zinc-300">
-                          <span className="text-zinc-300 font-semibold">{file.originalFormat.toUpperCase()}</span> → <span className="text-emerald-500 font-bold">{file.outputFormat}</span>
+                          <span className="text-zinc-300 font-semibold">{file.originalFormat.toUpperCase()}</span> → <span className="text-emerald-500 font-bold">{settings.actionMode === 'extract' || settings.actionMode === 'copy' ? (lang === 'ja' ? 'そのまま' : 'as is') : file.outputFormat}</span>
                         </td>
 
                         {/* Duration */}
@@ -975,9 +976,13 @@ export default function HomeDashboardPage() {
                         </td>
                         
                         {/* Sample rate */}
-                        <td className="py-2 px-3 text-zinc-400">{(((settings.dop && ['dsf', 'dff'].includes(file.originalFormat) && ['FLAC', 'WAV', 'AIFF'].includes((file.outputFormat || settings.outputFormat).toUpperCase()))
+                        <td className="py-2 px-3 text-zinc-400">{(((settings.dop && (file.sourceCodec ?? '').startsWith('dsd_') && file.trackStart === undefined && file.channelIndex === undefined
+                            && !['extract', 'copy', 'merge', 'encode_multi'].includes(settings.actionMode ?? 'encode')
+                            && ['FLAC', 'WAV', 'AIFF'].includes((file.outputFormat || settings.outputFormat).toUpperCase()))
                           // DoP carries DSD at half the rate it decodes to (DSD64: 176.4 kHz).
                           ? (file.sourceSampleRate ?? file.sampleRate) / 2
+                          : settings.actionMode === 'extract' || settings.actionMode === 'copy'
+                          ? (file.sourceSampleRate ?? file.sampleRate)
                           : outputSampleRate(file.sourceSampleRate ?? file.sampleRate, settings, file.outputFormat || settings.outputFormat)) / 1000).toFixed(1)} kHz</td>
 
                         {/* Bitrate */}
@@ -1725,8 +1730,11 @@ export default function HomeDashboardPage() {
                   <span>{t(lang, 'tagRules')}</span>
                 </label>
                 <textarea
-                  value={settings.tagReplaceRules ?? ''}
-                  onChange={(e) => updateSetting('tagReplaceRules', e.target.value)}
+                  // Edited locally and saved when the field loses focus: every saved change
+                  // rewrites the settings file and re-applies the rules to the queue.
+                  key={`${activeTabId}:${settings.tagReplaceRules ?? ''}`}
+                  defaultValue={settings.tagReplaceRules ?? ''}
+                  onBlur={(e) => { if (e.target.value !== (settings.tagReplaceRules ?? '')) updateSetting('tagReplaceRules', e.target.value); }}
                   rows={5}
                   spellCheck={false}
                   placeholder={'[*]\nFeaturing=Ft.\n[Comments]\n<NULL>=Converted %y%-%m%-%d%\n[Genre]\n%CHANGECASE%=CapitalizEeachWord'}

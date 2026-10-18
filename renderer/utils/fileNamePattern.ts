@@ -376,7 +376,7 @@ export function extractExtension(codec: string | undefined): string {
   if (c === 'ac3' || c === 'eac3' || c === 'dts' || c === 'tta') return c;
   if (c === 'truehd') return 'thd';
   if (c === 'wavpack') return 'wv';
-  if (c.startsWith('wma')) return 'wma';
+  if (['wmav1', 'wmav2', 'wmapro', 'wmalossless'].includes(c)) return 'wma';
   if (c.startsWith('pcm_')) return c.endsWith('be') ? 'aiff' : 'wav';
   return 'mka';
 }
