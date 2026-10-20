@@ -1,7 +1,7 @@
 {
   "private": true,
   "name": "audio_convert",
-  "description": "Audio Convert Application",
+  "description": "Free lossless audio converter for macOS, Windows and Linux: FLAC, ALAC, WAV, MP3, AAC, Opus and DSD, with bit-perfect verification and CUE splitting",
   "version": "1.2.0",
   "author": "oud0n",
   "license": "PolyForm-Noncommercial-1.0.0",

@@ -1,7 +1,7 @@
 [package]
 name = "audio_convert"
 version = "0.1.0"
-description = "Audio Convert Application"
+description = "Free lossless audio converter for macOS, Windows and Linux: FLAC, ALAC, WAV, MP3, AAC, Opus and DSD, with bit-perfect verification and CUE splitting"
 authors = ["oud0n"]
 license-file = "../LICENSE"
 repository = ""
