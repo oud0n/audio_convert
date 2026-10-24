@@ -118,9 +118,16 @@ jobs:
           if [ -n "$MAC_CERT_P12_BASE64" ]; then
             # A .p12 exported by Keychain Access uses old ciphers (RC2) that OpenSSL 3 reads only with -legacy.
             # Re-pack it with 3DES / SHA1, which every macOS `security` can import.
+            # The Intel runner's /usr/bin/openssl is LibreSSL (no -legacy, reads RC2 as is): prefer Homebrew's OpenSSL 3.
+            OPENSSL=openssl
+            for o in "$(brew --prefix openssl@3 2>/dev/null)/bin/openssl" /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+              [ -x "$o" ] && { OPENSSL="$o"; break; }
+            done
+            LEGACY=; "$OPENSSL" version | grep -q '^OpenSSL 3' && LEGACY=-legacy
+            "$OPENSSL" version
             printf '%s' "$MAC_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/in.p12"
-            openssl pkcs12 -legacy -in "$RUNNER_TEMP/in.p12" -nodes -passin env:MAC_CERT_PASSWORD -out "$RUNNER_TEMP/pem.pem"
-            openssl pkcs12 -export -in "$RUNNER_TEMP/pem.pem" -out "$RUNNER_TEMP/cert.p12" -passout env:MAC_CERT_PASSWORD \
+            "$OPENSSL" pkcs12 $LEGACY -in "$RUNNER_TEMP/in.p12" -nodes -passin env:MAC_CERT_PASSWORD -out "$RUNNER_TEMP/pem.pem"
+            "$OPENSSL" pkcs12 -export -in "$RUNNER_TEMP/pem.pem" -out "$RUNNER_TEMP/cert.p12" -passout env:MAC_CERT_PASSWORD \
               -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1
             echo "keys in p12: $(grep -c "PRIVATE KEY-----" "$RUNNER_TEMP/pem.pem" || true), certs: $(grep -c "BEGIN CERTIFICATE" "$RUNNER_TEMP/pem.pem" || true)"
             rm -f "$RUNNER_TEMP/pem.pem" "$RUNNER_TEMP/in.p12"
