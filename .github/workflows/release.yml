@@ -183,6 +183,8 @@ jobs:
           STRICT: ${{ env.RELEASE == 'true' || inputs.notarize == true }}
         run: |
           APP=$(ls -d src-tauri/target/release/bundle/macos/*.app)
+          # stapler validate asks Apple's servers; retry when the connection drops
+          validate() { for i in 1 2 3; do xcrun stapler validate "$1" && return 0; sleep 20; done; return 1; }
           codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority|TeamIdentifier|flags' || true
           if [ "$STRICT" = "true" ] && [ "$HAS_CERT" = "true" ]; then
             codesign --verify --deep --strict "$APP"
@@ -192,9 +194,9 @@ jobs:
             done
             for dmg in src-tauri/target/release/bundle/dmg/*.dmg; do
               codesign --verify --strict "$dmg"
-              xcrun stapler validate "$dmg"
+              validate "$dmg"
             done
-            xcrun stapler validate "$APP"
+            validate "$APP"
             out=$(spctl -a -vv -t exec "$APP" 2>&1) || { echo "$out"; exit 1; }
             echo "$out"
             grep -q 'source=Notarized Developer ID' <<< "$out" || { echo "::error::Gatekeeper does not see the app as notarized"; exit 1; }
@@ -248,8 +250,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: true
+          # Each build artifact keeps its bundle folders (dmg/, msi/, nsis/, deb/, ...)
           files: |
-            release-artifacts/*
+            release-artifacts/*/*
             ${{ runner.temp }}/sox/sox-dsd-*.tar.gz
             scripts/build-sox.sh
         env:
