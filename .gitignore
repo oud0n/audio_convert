@@ -25,3 +25,4 @@ for_test/
 
 # Local-only material. Never commit.
 /private/
+/_private/

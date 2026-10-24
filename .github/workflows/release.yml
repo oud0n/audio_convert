@@ -4,9 +4,21 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual run: builds (and signs) without publishing a release, to try the signing.
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: 'Notarize the macOS app (tags always notarize)'
+        type: boolean
+        default: false
 
+# Read-only by default; only the release job gets write access.
 permissions:
-  contents: write # create the release and upload assets
+  contents: read
+
+# A release is a tag push only. A manual run, even one started on a tag, does not publish.
+env:
+  RELEASE: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   ffmpeg:
@@ -84,19 +96,153 @@ jobs:
           SOX_BUNDLE_SOURCE="$bin" SOX_BUNDLE_LICENSE="$RUNNER_TEMP/sox/SOX-LICENSE.txt" node scripts/prepare-sox.mjs --release
 
       - name: Build app
+        if: runner.os != 'macOS'
         run: npm run build
 
-      - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v2
+      # macOS: sign with the Developer ID certificate from Secrets, and notarize on tags
+      # (or a manual run with notarize). Without Secrets (forks), build unsigned as before.
+      # Tauri signs the app and the bundled ffmpeg / sox with the hardened runtime, then
+      # notarizes and staples the app when the APPLE_API_* variables are set.
+      - name: Build app (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_VALUE: ${{ secrets.APPLE_API_ISSUER }}
+          NOTARIZE: ${{ env.RELEASE == 'true' || inputs.notarize == true }}
+        run: |
+          # Do not leave key files behind, even when a command fails
+          trap 'rm -f "$RUNNER_TEMP/pem.pem" "$RUNNER_TEMP/in.p12" "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/AuthKey.p8"' EXIT
+          if [ -n "$MAC_CERT_P12_BASE64" ]; then
+            # A .p12 exported by Keychain Access uses old ciphers (RC2) that OpenSSL 3 reads only with -legacy.
+            # Re-pack it with 3DES / SHA1, which every macOS `security` can import.
+            printf '%s' "$MAC_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/in.p12"
+            openssl pkcs12 -legacy -in "$RUNNER_TEMP/in.p12" -nodes -passin env:MAC_CERT_PASSWORD -out "$RUNNER_TEMP/pem.pem"
+            openssl pkcs12 -export -in "$RUNNER_TEMP/pem.pem" -out "$RUNNER_TEMP/cert.p12" -passout env:MAC_CERT_PASSWORD \
+              -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1
+            echo "keys in p12: $(grep -c "PRIVATE KEY-----" "$RUNNER_TEMP/pem.pem" || true), certs: $(grep -c "BEGIN CERTIFICATE" "$RUNNER_TEMP/pem.pem" || true)"
+            rm -f "$RUNNER_TEMP/pem.pem" "$RUNNER_TEMP/in.p12"
+            # Our own signing keychain, added to the search list so codesign finds the identity
+            KC="$RUNNER_TEMP/signing.keychain-db"
+            KC_PW="$(openssl rand -hex 16)"
+            security create-keychain -p "$KC_PW" "$KC"
+            security set-keychain-settings -lut 21600 "$KC"
+            security unlock-keychain -p "$KC_PW" "$KC"
+            security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PW" "$KC" > /dev/null
+            security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+            rm -f "$RUNNER_TEMP/cert.p12"
+            export APPLE_SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$KC" | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)"
+            if [ -z "$APPLE_SIGNING_IDENTITY" ]; then echo "::error::No Developer ID Application identity in MAC_CERT_P12_BASE64"; exit 1; fi
+            echo "Signing with Developer ID"
+          else
+            # A release tag must not ship an unsigned app
+            if [ "$RELEASE" = "true" ]; then echo "::error::Release tag, but no signing certificate (MAC_CERT_P12_BASE64)"; exit 1; fi
+            echo "No certificate: building unsigned"
+          fi
+          NOTARIZING=false
+          if [ "$NOTARIZE" = "true" ] && [ -n "$MAC_CERT_P12_BASE64" ]; then
+            if [ -z "$APPLE_API_KEY_P8" ] || [ -z "$APPLE_API_KEY_ID" ] || [ -z "$APPLE_API_ISSUER_VALUE" ]; then
+              echo "::error::Notarizing needs APPLE_API_KEY_P8, APPLE_API_KEY_ID and APPLE_API_ISSUER"; exit 1
+            fi
+            NOTARIZING=true
+            printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+            export APPLE_API_KEY="$APPLE_API_KEY_ID"
+            export APPLE_API_ISSUER="$APPLE_API_ISSUER_VALUE"
+            export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+            echo "Notarizing"
+          fi
+          npm run build
+          # Tauri notarizes and staples only the .app. Notarize and staple the DMG we ship too,
+          # so Gatekeeper accepts the downloaded disk image itself.
+          if [ "$NOTARIZING" = "true" ]; then
+            for dmg in src-tauri/target/release/bundle/dmg/*.dmg; do
+              xcrun notarytool submit "$dmg" --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --wait --timeout 1h \
+                | tee "$RUNNER_TEMP/notary.txt"
+              grep -q 'status: Accepted' "$RUNNER_TEMP/notary.txt" || { echo "::error::Notarizing $dmg failed"; exit 1; }
+              xcrun stapler staple "$dmg"
+            done
+          fi
+
+      # When the app was notarized (always on a release tag), stop unless the app, every
+      # bundled binary and the DMG are signed, the app and the DMG carry stapled tickets, and
+      # Gatekeeper accepts it as notarized (not merely because assessments are disabled).
+      - name: Check macOS signature
+        if: runner.os == 'macOS'
+        env:
+          HAS_CERT: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+          STRICT: ${{ env.RELEASE == 'true' || inputs.notarize == true }}
+        run: |
+          APP=$(ls -d src-tauri/target/release/bundle/macos/*.app)
+          codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority|TeamIdentifier|flags' || true
+          if [ "$STRICT" = "true" ] && [ "$HAS_CERT" = "true" ]; then
+            codesign --verify --deep --strict "$APP"
+            for bin in "$APP"/Contents/MacOS/*; do
+              codesign --verify --strict "$bin"
+              codesign -dv "$bin" 2>&1 | grep -q 'flags=.*runtime' || { echo "::error::$bin lacks the hardened runtime"; exit 1; }
+            done
+            for dmg in src-tauri/target/release/bundle/dmg/*.dmg; do
+              codesign --verify --strict "$dmg"
+              xcrun stapler validate "$dmg"
+            done
+            xcrun stapler validate "$APP"
+            out=$(spctl -a -vv -t exec "$APP" 2>&1) || { echo "$out"; exit 1; }
+            echo "$out"
+            grep -q 'source=Notarized Developer ID' <<< "$out" || { echo "::error::Gatekeeper does not see the app as notarized"; exit 1; }
+          else
+            spctl -a -vv -t exec "$APP" 2>&1 || true
+          fi
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
         with:
-          fail_on_unmatched_files: false
-          files: |
+          name: build-${{ matrix.ffmpeg }}
+          path: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/deb/*.deb
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+
+  # Publish only after every platform built (and the Macs passed the signature check),
+  # so a release never goes out with a platform missing.
+  release:
+    name: Release to GitHub
+    needs: build-and-release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload assets
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/build-sox.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: release-artifacts
+          merge-multiple: true
+
+      # The SoX source tarball is the same on every platform; take it from one.
+      - uses: actions/download-artifact@v4
+        with:
+          name: sox-linux-x64
+          path: ${{ runner.temp }}/sox
+
+      - run: ls -la release-artifacts "$RUNNER_TEMP"/sox
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            release-artifacts/*
             ${{ runner.temp }}/sox/sox-dsd-*.tar.gz
             scripts/build-sox.sh
         env:
